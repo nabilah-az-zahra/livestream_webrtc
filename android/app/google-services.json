@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "766475877975",
+    "project_id": "livestream-webrtc",
+    "storage_bucket": "livestream-webrtc.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:766475877975:android:0b3b379291595f52ad2d12",
+        "android_client_info": {
+          "package_name": "com.example.livestream_webrtc"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAh3Tp3NXekJu_Ok34ewlDbE29R_PSb8ds"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
