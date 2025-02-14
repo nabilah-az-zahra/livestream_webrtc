@@ -1,3 +1,4 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -14,7 +15,7 @@ class StartLivePage extends StatefulWidget {
 
 class _StartLivePageState extends State<StartLivePage> {
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
-  final SignalingService _signalingService = SignalingService();
+  final _signalingService = SignalingService('http://localhost:3000');
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
   final TextEditingController _titleController = TextEditingController();
@@ -65,11 +66,16 @@ class _StartLivePageState extends State<StartLivePage> {
         {
           'urls': [
             'stun:stun1.l.google.com:19302',
-            'stun:stun2.l.google.com:19302'
-          ]
+            'stun:stun2.l.google.com:19302',
+            'stun:stun3.l.google.com:19302',
+            'stun:stun4.l.google.com:19302',
+          ],
         }
       ],
-      'sdpSemantics': 'unified-plan'
+      'sdpSemantics': 'unified-plan',
+      'iceTransportPolicy': 'all',
+      'bundlePolicy': 'max-bundle',
+      'rtcpMuxPolicy': 'require',
     };
 
     final conn = await createPeerConnection(configuration);
@@ -83,29 +89,34 @@ class _StartLivePageState extends State<StartLivePage> {
     try {
       _peerConnection = await _createPeerConnection();
 
-      if (_localStream == null) {
-        throw Exception('No local stream available');
-      }
+      _peerConnection?.onIceCandidate = (candidate) {
+        if (candidate != null) {
+          _signalingService.sendIceCandidate(streamId, candidate);
+        }
+      };
 
       _localStream!.getTracks().forEach((track) {
         _peerConnection?.addTrack(track, _localStream!);
       });
 
-      _peerConnection?.onIceCandidate = (candidate) {
-        if (candidate != null) {
-          _signalingService.addIceCandidate(streamId, candidate);
-        }
-      };
+      _signalingService.connect();
+      _signalingService.joinStream(streamId, true);
 
-      RTCSessionDescription offer = await _peerConnection!.createOffer({
-        'offerToReceiveAudio': 0,
-        'offerToReceiveVideo': 0,
+      _signalingService.onViewerJoined((viewerId) async {
+        RTCSessionDescription offer = await _peerConnection!.createOffer();
+        await _peerConnection!.setLocalDescription(offer);
+        _signalingService.sendOffer(streamId, viewerId, offer);
       });
 
-      await _peerConnection!.setLocalDescription(offer);
-
-      await _signalingService.createStream(streamId);
-      await _signalingService.setOffer(streamId, offer);
+      _signalingService.onAnswer((data) async {
+        if (data['answer'] != null) {
+          final answer = RTCSessionDescription(
+            data['answer']['sdp'],
+            data['answer']['type'],
+          );
+          await _peerConnection?.setRemoteDescription(answer);
+        }
+      });
     } catch (e) {
       print('Error setting up connection: $e');
       rethrow;
@@ -125,12 +136,18 @@ class _StartLivePageState extends State<StartLivePage> {
     try {
       final String streamId = DateTime.now().millisecondsSinceEpoch.toString();
       final String streamTitle = _titleController.text;
-      const String streamerName = "Streamer Name";
+      final User? currentUser = FirebaseAuth.instance.currentUser;
+      if (currentUser == null) {
+        throw Exception('No user logged in');
+      }
+      final String streamerId = currentUser.uid;
+      final String streamerUsername = currentUser.displayName ?? 'Unknown';
 
       await FirebaseFirestore.instance.collection('streams').doc(streamId).set({
         'streamId': streamId,
         'streamTitle': streamTitle,
-        'streamerName': streamerName,
+        'streamerId': streamerId,
+        'streamerUsername': streamerUsername,
         'isLive': true,
         'createdAt': FieldValue.serverTimestamp(),
         'viewerCount': 0,
@@ -144,7 +161,8 @@ class _StartLivePageState extends State<StartLivePage> {
           MaterialPageRoute(
             builder: (context) => LiveStreamPage(
               streamTitle: streamTitle,
-              streamerName: streamerName,
+              streamerId: streamerId,
+              streamerUsername: streamerUsername,
               streamId: streamId,
               isStreamer: true,
             ),
@@ -180,6 +198,7 @@ class _StartLivePageState extends State<StartLivePage> {
 
   @override
   void dispose() {
+    _signalingService.disconnect();
     _localStream?.getTracks().forEach((track) => track.stop());
     _localStream?.dispose();
     _localRenderer.dispose();

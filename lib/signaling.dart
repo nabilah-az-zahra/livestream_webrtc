@@ -1,82 +1,121 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:socket_io_client/socket_io_client.dart' as IO;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 class SignalingService {
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  late IO.Socket _socket;
+  final String serverUrl;
+  bool _isConnected = false;
 
-  Future<void> createStream(String streamId) async {
-    await _firestore.collection('streams').doc(streamId).set({
-      'created': FieldValue.serverTimestamp(),
-      'ice_candidates': [],
-      'connectionState': 'new',
-    }, SetOptions(merge: true));
+  SignalingService(this.serverUrl) {
+    connect();
   }
 
-  Future<void> setOffer(String streamId, RTCSessionDescription offer) async {
-    await _firestore.collection('streams').doc(streamId).set({
+  void connect() {
+    if (_isConnected) return;
+
+    _socket = IO.io(
+        serverUrl,
+        IO.OptionBuilder()
+            .setTransports(['websocket'])
+            .enableReconnection()
+            .setReconnectionAttempts(5)
+            .setReconnectionDelay(3000)
+            .enableForceNew()
+            .build());
+
+    _socket.onConnect((_) {
+      print('Socket connected');
+      _isConnected = true;
+    });
+
+    _socket.onDisconnect((_) {
+      print('Socket disconnected');
+      _isConnected = false;
+    });
+
+    _socket.onError((error) {
+      print('Socket error: $error');
+    });
+
+    _socket.onConnectError((error) {
+      print('Socket connection error: $error');
+    });
+
+    _socket.connect();
+  }
+
+  void joinStream(String streamId, bool isStreamer) {
+    if (!_isConnected) {
+      print('Socket not connected, attempting to reconnect...');
+      connect();
+    }
+    _socket
+        .emit('join_stream', {'streamId': streamId, 'isStreamer': isStreamer});
+  }
+
+  void onViewerJoined(Function(String) callback) {
+    _socket.on('viewer_joined', (data) => callback(data['viewerId']));
+  }
+
+  void sendOffer(
+      String streamId, String viewerId, RTCSessionDescription offer) {
+    if (!_isConnected) return;
+
+    _socket.emit('offer', {
+      'streamId': streamId,
+      'viewerId': viewerId,
       'offer': {
         'type': offer.type,
         'sdp': offer.sdp,
-      },
-      'connectionState': 'offer-set',
-    }, SetOptions(merge: true));
+      }
+    });
   }
 
-  Future<void> setAnswer(String streamId, RTCSessionDescription answer) async {
-    await _firestore.collection('streams').doc(streamId).set({
+  void sendAnswer(String streamId, RTCSessionDescription answer) {
+    if (!_isConnected) {
+      print('Socket not connected when trying to send answer');
+      return;
+    }
+
+    print('Sending answer with SDP: ${answer.sdp}');
+    _socket.emit('answer', {
+      'streamId': streamId,
       'answer': {
         'type': answer.type,
         'sdp': answer.sdp,
-      },
-      'connectionState': 'answer-set',
-    }, SetOptions(merge: true));
-  }
-
-  Future<void> addIceCandidate(
-      String streamId, RTCIceCandidate candidate) async {
-    await _firestore.collection('streams').doc(streamId).update({
-      'ice_candidates': FieldValue.arrayUnion([
-        {
-          'candidate': candidate.candidate,
-          'sdpMid': candidate.sdpMid,
-          'sdpMLineIndex': candidate.sdpMLineIndex,
-        }
-      ]),
+      }
     });
   }
 
-  Stream<Map<String, dynamic>?> getStreamData(String streamId) {
-    return _firestore
-        .collection('streams')
-        .doc(streamId)
-        .snapshots()
-        .map((snap) => snap.data());
-  }
+  void sendIceCandidate(String streamId, RTCIceCandidate candidate) {
+    if (!_isConnected) return;
 
-  Future<void> updateConnectionState(String streamId, String state) async {
-    await _firestore.collection('streams').doc(streamId).update({
-      'connectionState': state,
+    _socket.emit('ice_candidate', {
+      'streamId': streamId,
+      'candidate': {
+        'candidate': candidate.candidate,
+        'sdpMid': candidate.sdpMid,
+        'sdpMLineIndex': candidate.sdpMLineIndex,
+      }
     });
   }
 
-  Future<void> clearIceCandidates(String streamId) async {
-    await _firestore.collection('streams').doc(streamId).update({
-      'ice_candidates': [],
-    });
+  void onOffer(Function(Map<String, dynamic>) callback) {
+    _socket.on('offer', (data) => callback(data));
   }
 
-  Stream<List<RTCIceCandidate>> getIceCandidates(String streamId) {
-    return _firestore
-        .collection('streams')
-        .doc(streamId)
-        .snapshots()
-        .map((snap) => snap.data()?['ice_candidates'] ?? [])
-        .map((candidates) => candidates.map<RTCIceCandidate>((candidate) {
-              return RTCIceCandidate(
-                candidate['candidate'],
-                candidate['sdpMid'],
-                candidate['sdpMLineIndex'],
-              );
-            }).toList());
+  void onAnswer(Function(Map<String, dynamic>) callback) {
+    _socket.on('answer', (data) => callback(data));
+  }
+
+  void onIceCandidate(Function(Map<String, dynamic>) callback) {
+    _socket.on('ice_candidate', (data) => callback(data));
+  }
+
+  void disconnect() {
+    if (!_isConnected) return;
+    _socket.disconnect();
+    _socket.dispose();
+    _isConnected = false;
   }
 }

@@ -15,7 +15,6 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   bool _isLoading = true;
   String? _errorMessage;
-  FirebaseFirestore? _firestoreInstance;
 
   @override
   void initState() {
@@ -52,55 +51,6 @@ class _HomePageState extends State<HomePage> {
     return 'Error connecting to database. Please try again later.';
   }
 
-  Future<void> _initializeFirestore() async {
-    try {
-      _firestoreInstance = FirebaseFirestore.instance;
-
-      await _firestoreInstance!.collection('streams').limit(1).get().timeout(
-            const Duration(seconds: 10),
-            onTimeout: () =>
-                throw TimeoutException('Database connection timeout'),
-          );
-
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _errorMessage = null;
-        });
-      }
-    } catch (e, stackTrace) {
-      print('Firestore Error: $e');
-      print('Stack trace: $stackTrace');
-
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _errorMessage = _getDetailedErrorMessage(e);
-        });
-      }
-    }
-  }
-
-  String _getDetailedErrorMessage(dynamic error) {
-    if (error is FirebaseException) {
-      switch (error.code) {
-        case 'permission-denied':
-          return 'Access denied. Please check database permissions.';
-        case 'unavailable':
-          return 'Database service is currently unavailable. Please try again later.';
-        case 'not-found':
-          return 'Database or collection not found. Please verify setup.';
-        case 'failed-precondition':
-          return 'Database operation failed. Please check your connection.';
-        default:
-          return 'Firebase Error: [${error.code}] ${error.message}';
-      }
-    } else if (error is TimeoutException) {
-      return 'Connection timed out. Please check your internet connection.';
-    }
-    return 'Error: ${error.toString()}';
-  }
-
   Widget _buildLiveStreamCard(DocumentSnapshot stream, int index) {
     final streamData = stream.data() as Map<String, dynamic>;
 
@@ -112,7 +62,8 @@ class _HomePageState extends State<HomePage> {
             builder: (context) => LiveStreamPage(
               streamId: stream.id,
               streamTitle: streamData['streamTitle'] ?? 'Untitled',
-              streamerName: streamData['streamerName'] ?? 'Unknown',
+              streamerId: '',
+              streamerUsername: streamData['streamerUsername'] ?? 'Unknown',
               isStreamer: false,
             ),
           ),
@@ -196,7 +147,7 @@ class _HomePageState extends State<HomePage> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      "Streamer: ${streamData['streamerName'] ?? 'Unknown'}",
+                      "Streamer: ${streamData['streamerUsername'] ?? 'Unknown'}",
                       style: GoogleFonts.kanit(
                         fontSize: 14,
                         color: Colors.white70,
@@ -305,13 +256,9 @@ class _HomePageState extends State<HomePage> {
                         ),
                       );
                     },
-                    style: ElevatedButton.styleFrom(
-                      shape: const CircleBorder(),
-                      padding: const EdgeInsets.all(12),
-                    ),
                     child: const Icon(
                       Icons.person_outline_outlined,
-                      color: Color(0xFF1E1E1E),
+                      color: Colors.black,
                       size: 30.0,
                     ),
                   ),
@@ -355,7 +302,7 @@ class _HomePageState extends State<HomePage> {
             ),
             Container(
               alignment: Alignment.center,
-              margin: const EdgeInsets.symmetric(vertical: 16.0),
+              margin: const EdgeInsets.symmetric(vertical: 8.0),
               child: ElevatedButton(
                 onPressed: () {
                   Navigator.push(
@@ -366,13 +313,15 @@ class _HomePageState extends State<HomePage> {
                   );
                 },
                 style: ElevatedButton.styleFrom(
-                  shape: const CircleBorder(),
-                  padding: const EdgeInsets.all(12),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                  padding: const EdgeInsets.all(4),
+                  backgroundColor: Colors.black,
                 ),
                 child: const Icon(
                   Icons.add_box_outlined,
-                  color: Color(0xFF1E1E1E),
-                  size: 30.0,
+                  color: Colors.white,
+                  size: 24.0,
                 ),
               ),
             ),
