@@ -51,24 +51,58 @@ class _HomePageState extends State<HomePage> {
     return 'Error connecting to database. Please try again later.';
   }
 
+  Future<Map<String, dynamic>?> getStreamInfo(String streamId) async {
+    try {
+      final streamDoc = await FirebaseFirestore.instance
+          .collection('streams')
+          .doc(streamId)
+          .get();
+
+      if (!streamDoc.exists) {
+        return null;
+      }
+
+      return streamDoc.data();
+    } catch (e) {
+      print('Error fetching stream info: $e');
+      return null;
+    }
+  }
+
+  void joinStream(String streamId) async {
+    final streamInfo = await getStreamInfo(streamId);
+
+    if (streamInfo == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Stream not found or no longer available')),
+        );
+      }
+      return;
+    }
+
+    if (mounted) {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (context) => LiveStreamPage(
+            streamTitle: streamInfo['streamTitle'],
+            streamerId: streamInfo['streamerId'],
+            streamerUsername: streamInfo['streamerUsername'],
+            streamId: streamId,
+            isStreamer: false,
+          ),
+        ),
+      );
+    }
+  }
+
   Widget _buildLiveStreamCard(DocumentSnapshot stream, int index) {
     final streamData = stream.data() as Map<String, dynamic>;
 
     return GestureDetector(
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => LiveStreamPage(
-              streamId: stream.id,
-              streamTitle: streamData['streamTitle'] ?? 'Untitled',
-              streamerId: '',
-              streamerUsername: streamData['streamerUsername'] ?? 'Unknown',
-              isStreamer: false,
-            ),
-          ),
-        );
-      },
+      onTap: () => joinStream(stream.id),
       child: Container(
         margin: const EdgeInsets.symmetric(
           vertical: 8.0,

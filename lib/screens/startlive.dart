@@ -3,8 +3,10 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:livestream_webrtc/exchange_service.dart';
 import 'package:livestream_webrtc/screens/livestream.dart';
 import 'package:livestream_webrtc/signaling.dart';
+import 'package:livestream_webrtc/e2ee_service.dart';
 
 class StartLivePage extends StatefulWidget {
   const StartLivePage({super.key});
@@ -16,9 +18,11 @@ class StartLivePage extends StatefulWidget {
 class _StartLivePageState extends State<StartLivePage> {
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final _signalingService = SignalingService('http://localhost:3000');
+  final TextEditingController _titleController = TextEditingController();
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
-  final TextEditingController _titleController = TextEditingController();
+  RTCDataChannel? _encryptedVideoChannel;
+  bool _isEncryptionReady = false;
   bool _isSettingUp = false;
   bool _isCameraInitialized = false;
 
@@ -89,6 +93,35 @@ class _StartLivePageState extends State<StartLivePage> {
     try {
       _peerConnection = await _createPeerConnection();
 
+      final dataChannelInit = RTCDataChannelInit()
+        ..ordered = true
+        ..protocol = 'video-e2ee';
+
+      _encryptedVideoChannel = await _peerConnection!
+          .createDataChannel('video-e2ee', dataChannelInit);
+
+      await StreamCryptoService.encryptRtpSender(
+        _encryptedVideoChannel!,
+        streamId,
+        FirebaseAuth.instance.currentUser!.uid,
+        FirebaseAuth.instance.currentUser!.uid,
+        true,
+      );
+
+      // Verify encryption is working
+      print('Attempting to verify stream encryption...');
+      final encryptionVerified =
+          await StreamCryptoService.verifyEncryption(streamId);
+      if (!encryptionVerified) {
+        throw Exception(
+            'Stream encryption verification failed. Check logs for details.');
+      }
+      print('Stream encryption verified successfully');
+
+      setState(() {
+        _isEncryptionReady = true;
+      });
+
       _peerConnection?.onIceCandidate = (candidate) {
         if (candidate != null) {
           _signalingService.sendIceCandidate(streamId, candidate);
@@ -102,14 +135,17 @@ class _StartLivePageState extends State<StartLivePage> {
       _signalingService.connect();
       _signalingService.joinStream(streamId, true);
 
+      // Handle viewer connections
       _signalingService.onViewerJoined((viewerId) async {
-        RTCSessionDescription offer = await _peerConnection!.createOffer();
-        await _peerConnection!.setLocalDescription(offer);
-        _signalingService.sendOffer(streamId, viewerId, offer);
+        if (_peerConnection != null) {
+          RTCSessionDescription offer = await _peerConnection!.createOffer();
+          await _peerConnection!.setLocalDescription(offer);
+          _signalingService.sendOffer(streamId, viewerId, offer);
+        }
       });
 
       _signalingService.onAnswer((data) async {
-        if (data['answer'] != null) {
+        if (data['answer'] != null && _peerConnection != null) {
           final answer = RTCSessionDescription(
             data['answer']['sdp'],
             data['answer']['type'],
@@ -143,6 +179,39 @@ class _StartLivePageState extends State<StartLivePage> {
       final String streamerId = currentUser.uid;
       final String streamerUsername = currentUser.displayName ?? 'Unknown';
 
+      print('Using streamId: $streamId for key exchange');
+
+      // Generate and store the stream key first
+      final keyExchange = await StreamKeyExchangeService.generateSharedSecret(
+        currentUser.uid,
+        currentUser.uid,
+        true,
+        streamId: streamId,
+      );
+
+      if (!keyExchange['success']) {
+        throw Exception(
+            'Failed to setup stream encryption: ${keyExchange['error']}');
+      }
+
+      // Verify key exchange
+      final verification = await StreamKeyExchangeService.verifyKeyExchange(
+        keyExchange['exchangeId'],
+        streamId: streamId,
+      );
+
+      if (verification['verified']) {
+      } else {
+        throw Exception('Key exchange verification failed');
+      }
+
+      print('Exchange verified successfully');
+      print('Exchange details: ${verification['exchange']}');
+      print('Exchange logs: ${verification['logs']}');
+
+      // Setup peer connection with encryption
+      await _setupPeerConnection(streamId);
+
       await FirebaseFirestore.instance.collection('streams').doc(streamId).set({
         'streamId': streamId,
         'streamTitle': streamTitle,
@@ -151,9 +220,17 @@ class _StartLivePageState extends State<StartLivePage> {
         'isLive': true,
         'createdAt': FieldValue.serverTimestamp(),
         'viewerCount': 0,
+        'encryptionReady': false,
       });
 
       await _setupPeerConnection(streamId);
+
+      await FirebaseFirestore.instance
+          .collection('streams')
+          .doc(streamId)
+          .update({
+        'encryptionReady': true,
+      });
 
       if (mounted) {
         Navigator.pushReplacement(
@@ -186,6 +263,24 @@ class _StartLivePageState extends State<StartLivePage> {
     }
   }
 
+  Future<Map<String, dynamic>?> getStreamInfo(String streamId) async {
+    try {
+      final streamDoc = await FirebaseFirestore.instance
+          .collection('streams')
+          .doc(streamId)
+          .get();
+
+      if (!streamDoc.exists) {
+        return null;
+      }
+
+      return streamDoc.data();
+    } catch (e) {
+      print('Error fetching stream info: $e');
+      return null;
+    }
+  }
+
   Future<bool> _checkFirestoreConnection() async {
     try {
       await FirebaseFirestore.instance.collection('streams').doc('test').get();
@@ -198,6 +293,7 @@ class _StartLivePageState extends State<StartLivePage> {
 
   @override
   void dispose() {
+    _encryptedVideoChannel?.close();
     _signalingService.disconnect();
     _localStream?.getTracks().forEach((track) => track.stop());
     _localStream?.dispose();

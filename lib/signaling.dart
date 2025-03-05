@@ -118,4 +118,20 @@ class SignalingService {
     _socket.dispose();
     _isConnected = false;
   }
+
+  void sendQualityRequest(String streamId, String quality, String viewerId) {
+    if (_socket != null && _socket!.connected) {
+      _socket!.emit('quality_request', {
+        'streamId': streamId,
+        'quality': quality,
+        'viewerId': viewerId,
+      });
+    }
+  }
+
+  void onQualityRequest(Function(Map<String, dynamic>) callback) {
+    _socket?.on('quality_request', (data) {
+      callback(data);
+    });
+  }
 }

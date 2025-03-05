@@ -1,8 +1,10 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:livestream_webrtc/screens/homepage.dart';
 import 'package:livestream_webrtc/screens/register.dart';
+import 'package:livestream_webrtc/ecdh_service.dart';
 
 bool isObscure = false;
 
@@ -19,10 +21,49 @@ class _LoginPageState extends State<LoginPage> {
 
   Future<void> loginUser() async {
     try {
-      await FirebaseAuth.instance.signInWithEmailAndPassword(
+      final userCredential =
+          await FirebaseAuth.instance.signInWithEmailAndPassword(
         email: emailController.text.trim(),
         password: passwordController.text.trim(),
       );
+
+      final userId = userCredential.user!.uid;
+
+      // Verify private key exists on device
+      final verifyResult = await EcdhService.verifyPrivateKey(userId);
+      if (!verifyResult['exists']) {
+        throw Exception('Private key not found. Please register again.');
+      }
+
+      // Update user status in Firestore
+      await FirebaseFirestore.instance.collection('users').doc(userId).update({
+        'userMetadata': {
+          'lastLogin': FieldValue.serverTimestamp(),
+          'isOnline': true,
+        },
+        'keyStatus': {
+          'lastVerificationTime': FieldValue.serverTimestamp(),
+          'privateKeyStatus': 'Verified on Login',
+        }
+      });
+
+      print('Login successful for user: $userId');
+
+      final privateKey = await EcdhService.getPrivateKey(userId);
+      if (privateKey == null) {
+        // Try restoring from Firestore
+        final userDoc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(userId)
+            .get();
+        if (userDoc.exists && userDoc.data()!.containsKey('privateKey')) {
+          final restoredKey = userDoc.data()!['privateKey'];
+          await EcdhService.savePrivateKey(userId, restoredKey);
+          print("Private key successfully restored.");
+        } else {
+          throw Exception('Private key not found. Please register again.');
+        }
+      }
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Login Successful!')),
@@ -32,12 +73,23 @@ class _LoginPageState extends State<LoginPage> {
         context,
         MaterialPageRoute(builder: (context) => const HomePage()),
       );
-    } on FirebaseAuthException catch (e) {
+    } catch (e) {
+      print('Login error: $e');
+
       String errorMessage = 'Login Failed';
-      if (e.code == 'user-not-found') {
-        errorMessage = 'No user found with this email';
-      } else if (e.code == 'wrong-password') {
-        errorMessage = 'Incorrect password';
+      if (e is FirebaseAuthException) {
+        print('FirebaseAuthException: ${e.code} - ${e.message}');
+        if (e.code == 'user-not-found') {
+          errorMessage = 'No user found with this email';
+        } else if (e.code == 'wrong-password') {
+          errorMessage = 'Incorrect password';
+        } else if (e.code == 'invalid-email') {
+          errorMessage = 'Invalid email format';
+        } else {
+          errorMessage = e.message ?? 'Authentication failed';
+        }
+      } else if (e.toString().contains('Private key not found')) {
+        errorMessage = 'Private key missing. Please register again.';
       }
 
       ScaffoldMessenger.of(context).showSnackBar(

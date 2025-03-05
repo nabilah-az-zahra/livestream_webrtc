@@ -1,7 +1,9 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:livestream_webrtc/screens/login.dart';
+import 'package:livestream_webrtc/ecdh_service.dart';
 
 bool isObscure = false;
 
@@ -25,6 +27,76 @@ class _RegisterPageState extends State<RegisterPage> {
         password: passwordController.text.trim(),
       );
 
+      final userId = userCredential.user!.uid;
+      final username = nameController.text.trim();
+
+      // Generate and verify key pair
+      final keyGenResult = await EcdhService.generateKeyPair();
+      if (!keyGenResult['success']) {
+        throw Exception('Failed to generate keys: ${keyGenResult['error']}');
+      }
+
+      // Extract private key bytes first
+      final privateKeyBytes = keyGenResult['privateKeyBytes'];
+      final keyPair = keyGenResult['keyPair'];
+
+      // Save private key securely on device
+      final privateKeyResult =
+          await EcdhService.savePrivateKey(userId, privateKeyBytes);
+      if (!privateKeyResult['success']) {
+        throw Exception(
+            'Failed to save private key: ${privateKeyResult['error']}');
+      }
+
+      // Save and verify public key
+      final publicKeyResult = await EcdhService.savePublicKey(
+          userId, keyGenResult['publicKeyBytes']);
+      if (!publicKeyResult['success']) {
+        throw Exception(
+            'Failed to save public key: ${publicKeyResult['error']}');
+      }
+
+      // Verify private key was saved
+      final verifyResult = await EcdhService.verifyPrivateKey(userId);
+      if (!verifyResult['exists']) {
+        throw Exception(
+            'Private key verification failed: ${verifyResult['error']}');
+      }
+
+      // Log successful key generation and storage
+      print('Key generation successful:');
+      print('- Private key length: ${privateKeyResult['keyLength']}');
+      print('- Private key preview: ${verifyResult['keyPreview']}');
+      print('- Public key length: ${publicKeyResult['keyLength']}');
+
+      await FirebaseFirestore.instance.collection('users').doc(userId).set({
+        'username': username,
+        'email': emailController.text.trim(),
+        'publicKey': EcdhService.bytesToString(keyGenResult['publicKeyBytes']),
+        'keyStatus': {
+          'privateKeyGenerated': verifyResult['exists'],
+          'privateKeyGenerationTime': FieldValue.serverTimestamp(),
+          'privateKeyLength':
+              verifyResult['exists'] ? verifyResult['keyLength'] : null,
+          'privateKeyStatus': verifyResult['exists']
+              ? 'Generated Successfully'
+              : 'Generation Failed',
+          'lastVerificationTime': FieldValue.serverTimestamp(),
+        },
+        'keyDetails': {
+          'algorithm': 'X25519',
+          'publicKeyLength': keyGenResult['publicKeyBytes'].length,
+          'createdAt': FieldValue.serverTimestamp(),
+          'lastUpdated': FieldValue.serverTimestamp(),
+        },
+        'userMetadata': {
+          'createdAt': FieldValue.serverTimestamp(),
+          'lastLogin': FieldValue.serverTimestamp(),
+          'isOnline': true
+        }
+      });
+
+      // Update display name
       await userCredential.user?.updateDisplayName(nameController.text.trim());
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -35,16 +107,18 @@ class _RegisterPageState extends State<RegisterPage> {
         context,
         MaterialPageRoute(builder: (context) => const LoginPage()),
       );
-    } on FirebaseAuthException catch (e) {
+    } catch (e) {
       String errorMessage = 'Registration Failed';
-      if (e.code == 'email-already-in-use') {
-        errorMessage = 'Email already in use';
-      } else if (e.code == 'weak-password') {
-        errorMessage = 'Password should be at least 6 characters';
+      if (e is FirebaseAuthException) {
+        if (e.code == 'email-already-in-use') {
+          errorMessage = 'Email already in use';
+        } else if (e.code == 'weak-password') {
+          errorMessage = 'Password should be at least 6 characters';
+        }
       }
 
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(errorMessage)),
+        SnackBar(content: Text('$errorMessage: ${e.toString()}')),
       );
     }
   }
