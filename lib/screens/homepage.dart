@@ -5,6 +5,9 @@ import 'package:livestream_webrtc/screens/myprofile.dart';
 import 'package:livestream_webrtc/screens/startlive.dart';
 import 'package:livestream_webrtc/screens/livestream.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:livestream_webrtc/screens/login.dart';
+import 'package:livestream_webrtc/screens/register.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -15,11 +18,18 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   bool _isLoading = true;
   String? _errorMessage;
+  User? _currentUser;
 
   @override
   void initState() {
     super.initState();
     _checkFirestoreAccess();
+    _checkUserStatus();
+  }
+
+  Future<void> _checkUserStatus() async {
+    _currentUser = FirebaseAuth.instance.currentUser;
+    setState(() {});
   }
 
   Future<void> _checkFirestoreAccess() async {
@@ -70,6 +80,11 @@ class _HomePageState extends State<HomePage> {
   }
 
   void joinStream(String streamId) async {
+    if (_currentUser == null) {
+      _showLoginRequiredPopup();
+      return;
+    }
+
     final streamInfo = await getStreamInfo(streamId);
 
     if (streamInfo == null) {
@@ -96,6 +111,41 @@ class _HomePageState extends State<HomePage> {
         ),
       );
     }
+  }
+
+  void _showLoginRequiredPopup() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text('Login Required', style: GoogleFonts.kanit()),
+          content: Text('You need to register/login to watch live streams.',
+              style: GoogleFonts.kanit()),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const LoginPage()),
+                );
+              },
+              child: Text('Login', style: GoogleFonts.kanit()),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const RegisterPage()),
+                );
+              },
+              child: Text('Register', style: GoogleFonts.kanit()),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   Widget _buildLiveStreamCard(DocumentSnapshot stream, int index) {
@@ -281,20 +331,22 @@ class _HomePageState extends State<HomePage> {
                       color: const Color(0xFF1E1E1E),
                     ),
                   ),
-                  ElevatedButton(
-                    onPressed: () {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => const MyProfilePage(),
-                        ),
-                      );
-                    },
-                    child: const Icon(
+                  IconButton(
+                    icon: const Icon(
                       Icons.person_outline_outlined,
                       color: Colors.black,
                       size: 30.0,
                     ),
+                    onPressed: _currentUser == null
+                        ? null
+                        : () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) => const MyProfilePage(),
+                              ),
+                            );
+                          },
                   ),
                 ],
               ),
@@ -339,12 +391,16 @@ class _HomePageState extends State<HomePage> {
               margin: const EdgeInsets.symmetric(vertical: 8.0),
               child: ElevatedButton(
                 onPressed: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => const StartLivePage(),
-                    ),
-                  );
+                  if (_currentUser == null) {
+                    _showLoginRequiredPopup();
+                  } else {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => const StartLivePage(),
+                      ),
+                    );
+                  }
                 },
                 style: ElevatedButton.styleFrom(
                   shape: RoundedRectangleBorder(

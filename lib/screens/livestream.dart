@@ -89,6 +89,7 @@ class ConnectionMonitor {
   }
 
   void _setupConnectionMonitoring() {
+    // Monitor connection state changes
     peerConnection.onConnectionState = (RTCPeerConnectionState state) {
       print('Connection state changed to: $state');
 
@@ -111,6 +112,7 @@ class ConnectionMonitor {
       }
     };
 
+    // Start periodic connection checks
     _monitorTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
       _checkConnection();
     });
@@ -162,6 +164,7 @@ class ConnectionMonitor {
   Future<void> _checkConnection() async {
     if (peerConnection.connectionState ==
         RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+      // Check data channel state
       final stats = await peerConnection.getStats();
       bool hasActiveDataChannel = false;
 
@@ -208,9 +211,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
 
   StreamSubscription? _streamStatusSubscription;
   StreamSubscription? _chatSubscription;
-
-  String _currentQuality = 'high';
-  final Map<String, String> _viewerQualityPreferences = {};
 
   List<ChatMessage> chatMessages = [];
 
@@ -291,6 +291,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
           throw Exception('Streamer ID is missing or invalid');
         }
 
+        // For viewer, exchange keys with streamer
         final keyExchange = await StreamKeyExchangeService.generateSharedSecret(
           FirebaseAuth.instance.currentUser!.uid,
           widget.streamerId,
@@ -352,6 +353,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
 
     _localRenderer.srcObject = _localStream;
 
+    // Verify encryption is ready before setting up connection
     final encryptionVerified =
         await StreamCryptoService.verifyEncryption(widget.streamId);
     if (!encryptionVerified) {
@@ -377,29 +379,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     });
 
     await _setupViewerConnection();
-
-    _peerConnection?.onConnectionState = (RTCPeerConnectionState state) {
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected &&
-          _encryptedVideoChannel == null) {
-        _setupEncryptedDataChannel(_peerConnection!);
-      }
-
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-        setState(() {
-          _remoteVideoConnected = true;
-        });
-      } else if (state ==
-              RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
-          state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-        setState(() {
-          _remoteVideoConnected = false;
-        });
-      }
-    };
-
-    if (!widget.isStreamer) {
-      _currentQuality = 'high';
-    }
   }
 
   Future<RTCPeerConnection> _createPeerConnection() async {
@@ -454,6 +433,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       final peerConnection = await createPeerConnection(configuration);
       if (peerConnection == null) return null;
 
+      // Set up connection state monitoring
       peerConnection.onConnectionState = (RTCPeerConnectionState state) {
         print('Connection state for $viewerId: $state');
         if (state ==
@@ -491,8 +471,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     try {
       _signalingService.connect();
       _signalingService.joinStream(widget.streamId, true);
-
-      _setupQualityHandling();
 
       _signalingService.onViewerJoined((viewerId) async {
         print('Setting up connection for viewer: $viewerId');
@@ -608,6 +586,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
   Future<void> _setupViewerConnection() async {
     try {
       _peerConnection = await _createPeerConnection();
+      // Add connection monitor
       _connectionMonitor = ConnectionMonitor(
         peerConnection: _peerConnection!,
         streamId: widget.streamId,
@@ -702,21 +681,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
           print('Error handling ICE candidate: $e');
         }
       });
-
-      _encryptedVideoChannel?.onMessage = (RTCDataChannelMessage message) {
-        try {
-          final data = jsonDecode(message.text);
-          if (data['type'] == 'quality_changed' &&
-              data['viewerId'] == FirebaseAuth.instance.currentUser!.uid) {
-            print('Quality changed successfully to: ${data['quality']}');
-            setState(() {
-              _remoteVideoConnected = true;
-            });
-          }
-        } catch (e) {
-          print('Error processing data channel message: $e');
-        }
-      };
     } catch (e) {
       print('Error in setupViewerConnection: $e');
       rethrow;
@@ -758,211 +722,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
           .update({'isLive': false});
     } catch (e) {
       print('Error ending stream: $e');
-    }
-  }
-
-  void _showQualitySelectionDialog() {
-    showDialog(
-      context: context,
-      builder: (BuildContext context) {
-        return AlertDialog(
-          backgroundColor: const Color(0xFF1A1A1A),
-          title: Text(
-            'Video Quality',
-            style: GoogleFonts.inter(color: Colors.white),
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _buildQualityOption('Low (240p-480p)', 'low'),
-              _buildQualityOption('Medium (720p)', 'medium'),
-              _buildQualityOption('High (1080p)', 'high'),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildQualityOption(String label, String quality) {
-    final isSelected = _currentQuality == quality;
-
-    return ListTile(
-      title: Text(
-        label,
-        style: GoogleFonts.inter(
-          color: Colors.white,
-          fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-        ),
-      ),
-      leading: isSelected
-          ? const Icon(Icons.check, color: Colors.blue)
-          : const SizedBox(width: 24),
-      onTap: () {
-        Navigator.of(context).pop();
-        _changeVideoQuality(quality);
-      },
-    );
-  }
-
-  Future<void> _changeVideoQuality(String quality) async {
-    if (_currentQuality == quality) return;
-
-    setState(() {
-      _currentQuality = quality;
-      _remoteVideoConnected = false;
-    });
-
-    await _requestQualityChange(quality);
-
-    Future.delayed(const Duration(seconds: 5), () {
-      if (mounted && !_remoteVideoConnected) {
-        setState(() {
-          _remoteVideoConnected = true;
-        });
-      }
-    });
-  }
-
-  Future<void> _requestQualityChange(String quality) async {
-    bool dataSent = false;
-
-    if (_encryptedVideoChannel != null &&
-        _encryptedVideoChannel!.state ==
-            RTCDataChannelState.RTCDataChannelOpen) {
-      try {
-        final message = jsonEncode({
-          'type': 'quality_request',
-          'quality': quality,
-          'viewerId': FirebaseAuth.instance.currentUser!.uid,
-        });
-
-        _encryptedVideoChannel!.send(RTCDataChannelMessage(message));
-
-        dataSent = true;
-
-        print('Sent quality request via data channel: $quality');
-      } catch (e) {
-        print('Error sending quality request via data channel: $e');
-      }
-    } else {
-      print('Data channel not available: ${_encryptedVideoChannel?.state}');
-    }
-    try {
-      _signalingService.sendQualityRequest(
-        widget.streamId,
-        quality,
-        FirebaseAuth.instance.currentUser!.uid,
-      );
-      dataSent = true;
-      print('Sent quality request via signaling: $quality');
-    } catch (e) {
-      print('Error sending quality request via signaling: $e');
-    }
-
-    if (!dataSent) {
-      print('Failed to send quality request through any channel');
-      setState(() {
-        _remoteVideoConnected = true;
-      });
-    }
-  }
-
-  void _setupQualityHandling() {
-    if (widget.isStreamer) {
-      _encryptedVideoChannel?.onMessage = (RTCDataChannelMessage message) {
-        try {
-          final data = jsonDecode(message.text);
-          if (data['type'] == 'quality_request') {
-            _handleQualityRequest(data['quality'], data['viewerId']);
-          }
-        } catch (e) {
-          print('Error processing data channel message: $e');
-        }
-      };
-
-      _signalingService.onQualityRequest((data) {
-        _handleQualityRequest(data['quality'], data['viewerId']);
-      });
-    }
-  }
-
-  void _handleQualityRequest(String quality, String viewerId) {
-    print('Received quality request: $quality from $viewerId');
-    _viewerQualityPreferences[viewerId] = quality;
-
-    final peerConnection = _peerConnections[viewerId];
-    if (peerConnection != null) {
-      print('Found peer connection for viewer, adjusting parameters');
-      _adjustSenderParameters(peerConnection, quality).then((_) {
-        try {
-          if (_encryptedVideoChannel != null &&
-              _encryptedVideoChannel!.state ==
-                  RTCDataChannelState.RTCDataChannelOpen) {
-            final confirmMessage = jsonEncode({
-              'type': 'quality_changed',
-              'quality': quality,
-              'viewerId': viewerId
-            });
-            _encryptedVideoChannel!.send(RTCDataChannelMessage(confirmMessage));
-          }
-        } catch (e) {
-          print('Error sending quality confirmation: $e');
-        }
-      });
-    } else {
-      print('No peer connection found for viewer: $viewerId');
-    }
-  }
-
-  Future<void> _adjustSenderParameters(
-      RTCPeerConnection peerConnection, String quality) async {
-    if (_localStream == null) return;
-
-    final senders = await peerConnection.getSenders();
-    for (var sender in senders) {
-      if (sender.track?.kind == 'video') {
-        final parameters = sender.parameters;
-        if (parameters.encodings != null) {
-          switch (quality) {
-            case 'low':
-              _setLowQualityParameters(parameters.encodings!);
-              break;
-            case 'medium':
-              _setMediumQualityParameters(parameters.encodings!);
-              break;
-            case 'high':
-              _setHighQualityParameters(parameters.encodings!);
-              break;
-          }
-          await sender.setParameters(parameters);
-          print("Quality changed successfully to: $quality");
-        }
-      }
-    }
-  }
-
-  void _setLowQualityParameters(List<RTCRtpEncoding> encodings) {
-    for (var encoding in encodings) {
-      encoding.maxBitrate = 1000000;
-      encoding.maxFramerate = 24;
-      encoding.scaleResolutionDownBy = 4.0; // Down to 480p or less
-    }
-  }
-
-  void _setMediumQualityParameters(List<RTCRtpEncoding> encodings) {
-    for (var encoding in encodings) {
-      encoding.maxBitrate = 2500000; // 2.5 Mbps
-      encoding.maxFramerate = 30;
-      encoding.scaleResolutionDownBy = 2.0; // Down to 720p
-    }
-  }
-
-  void _setHighQualityParameters(List<RTCRtpEncoding> encodings) {
-    for (var encoding in encodings) {
-      encoding.maxBitrate = 4000000; // 4 Mbps
-      encoding.maxFramerate = 30;
-      encoding.scaleResolutionDownBy = 1.0; // Full resolution (1080p)
     }
   }
 
@@ -1188,11 +947,10 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
           onPressed: () => Navigator.pop(context),
         ),
         actions: [
-          if (!widget.isStreamer)
-            IconButton(
-              icon: const Icon(Icons.settings, color: Colors.white),
-              onPressed: _showQualitySelectionDialog,
-            ),
+          IconButton(
+            icon: const Icon(Icons.settings, color: Colors.white),
+            onPressed: () {},
+          ),
         ],
       ),
       body: Column(

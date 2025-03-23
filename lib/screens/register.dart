@@ -18,9 +18,21 @@ class _RegisterPageState extends State<RegisterPage> {
   final TextEditingController emailController = TextEditingController();
   final TextEditingController passwordController = TextEditingController();
   bool isObscure = true;
+  bool isRegistering = false;
 
   Future<void> registerUser() async {
+    if (isRegistering) return;
+
+    setState(() {
+      isRegistering = true;
+    });
+
     try {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Registering and generating secure keys...')),
+      );
+
       UserCredential userCredential =
           await FirebaseAuth.instance.createUserWithEmailAndPassword(
         email: emailController.text.trim(),
@@ -29,6 +41,7 @@ class _RegisterPageState extends State<RegisterPage> {
 
       final userId = userCredential.user!.uid;
       final username = nameController.text.trim();
+      final password = passwordController.text.trim();
 
       // Generate and verify key pair
       final keyGenResult = await EcdhService.generateKeyPair();
@@ -38,19 +51,21 @@ class _RegisterPageState extends State<RegisterPage> {
 
       // Extract private key bytes first
       final privateKeyBytes = keyGenResult['privateKeyBytes'];
-      final keyPair = keyGenResult['keyPair'];
+      final publicKeyBytes = keyGenResult['publicKeyBytes'];
+
+      // final keyPair = keyGenResult['keyPair'];
 
       // Save private key securely on device
       final privateKeyResult =
-          await EcdhService.savePrivateKey(userId, privateKeyBytes);
+          await EcdhService.savePrivateKey(userId, password, privateKeyBytes);
       if (!privateKeyResult['success']) {
         throw Exception(
             'Failed to save private key: ${privateKeyResult['error']}');
       }
 
       // Save and verify public key
-      final publicKeyResult = await EcdhService.savePublicKey(
-          userId, keyGenResult['publicKeyBytes']);
+      final publicKeyResult =
+          await EcdhService.savePublicKey(userId, publicKeyBytes);
       if (!publicKeyResult['success']) {
         throw Exception(
             'Failed to save public key: ${publicKeyResult['error']}');
@@ -72,20 +87,17 @@ class _RegisterPageState extends State<RegisterPage> {
       await FirebaseFirestore.instance.collection('users').doc(userId).set({
         'username': username,
         'email': emailController.text.trim(),
-        'publicKey': EcdhService.bytesToString(keyGenResult['publicKeyBytes']),
         'keyStatus': {
-          'privateKeyGenerated': verifyResult['exists'],
+          'privateKeyGenerated': true,
           'privateKeyGenerationTime': FieldValue.serverTimestamp(),
-          'privateKeyLength':
-              verifyResult['exists'] ? verifyResult['keyLength'] : null,
-          'privateKeyStatus': verifyResult['exists']
-              ? 'Generated Successfully'
-              : 'Generation Failed',
+          'privateKeyLength': verifyResult['keyLength'],
+          'privateKeyStatus': 'Generated and Encrypted',
           'lastVerificationTime': FieldValue.serverTimestamp(),
         },
         'keyDetails': {
           'algorithm': 'X25519',
-          'publicKeyLength': keyGenResult['publicKeyBytes'].length,
+          'publicKeyLength': publicKeyBytes.length,
+          'privateKeyStorage': 'AES-256-GCM Encrypted',
           'createdAt': FieldValue.serverTimestamp(),
           'lastUpdated': FieldValue.serverTimestamp(),
         },
@@ -120,6 +132,10 @@ class _RegisterPageState extends State<RegisterPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('$errorMessage: ${e.toString()}')),
       );
+    } finally {
+      setState(() {
+        isRegistering = false;
+      });
     }
   }
 
@@ -208,9 +224,7 @@ class _RegisterPageState extends State<RegisterPage> {
                     width: double.infinity,
                     height: 52,
                     child: ElevatedButton(
-                      onPressed: () async {
-                        await registerUser();
-                      },
+                      onPressed: isRegistering ? null : registerUser,
                       style: ElevatedButton.styleFrom(
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12),
@@ -220,13 +234,17 @@ class _RegisterPageState extends State<RegisterPage> {
                         ),
                         backgroundColor: const Color(0xFF1E1E1E),
                       ),
-                      child: Text(
-                        'Register',
-                        style: GoogleFonts.kanit(
-                            fontSize: 20,
-                            fontWeight: FontWeight.w400,
-                            color: const Color(0xFFFFFFFF)),
-                      ),
+                      child: isRegistering
+                          ? const CircularProgressIndicator(
+                              color: Colors.white,
+                            )
+                          : Text(
+                              'Register',
+                              style: GoogleFonts.kanit(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w400,
+                                  color: const Color(0xFFFFFFFF)),
+                            ),
                     ),
                   ),
                   const SizedBox(

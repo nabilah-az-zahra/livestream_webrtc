@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -18,8 +20,15 @@ class _LoginPageState extends State<LoginPage> {
   final TextEditingController emailController = TextEditingController();
   final TextEditingController passwordController = TextEditingController();
   bool isObscure = true;
+  bool isLoggingIn = false;
 
   Future<void> loginUser() async {
+    if (isLoggingIn) return;
+
+    setState(() {
+      isLoggingIn = true;
+    });
+
     try {
       final userCredential =
           await FirebaseAuth.instance.signInWithEmailAndPassword(
@@ -28,11 +37,28 @@ class _LoginPageState extends State<LoginPage> {
       );
 
       final userId = userCredential.user!.uid;
+      final password = passwordController.text.trim();
 
       // Verify private key exists on device
       final verifyResult = await EcdhService.verifyPrivateKey(userId);
       if (!verifyResult['exists']) {
         throw Exception('Private key not found. Please register again.');
+      }
+
+      Uint8List? privateKeyBytes;
+
+      if (verifyResult['source'] == 'local_storage') {
+        // If key is in local storage, we can retrieve it directly
+        privateKeyBytes = await EcdhService.getPrivateKeyFromStorage(userId);
+      } else {
+        // If key is in Firebase, we need to decrypt it with the password
+        privateKeyBytes =
+            await EcdhService.getPrivateKey(userId, password: password);
+      }
+
+      if (privateKeyBytes == null) {
+        throw Exception(
+            'Failed to retrieve private key. Please register again.');
       }
 
       // Update user status in Firestore
@@ -48,22 +74,6 @@ class _LoginPageState extends State<LoginPage> {
       });
 
       print('Login successful for user: $userId');
-
-      final privateKey = await EcdhService.getPrivateKey(userId);
-      if (privateKey == null) {
-        // Try restoring from Firestore
-        final userDoc = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(userId)
-            .get();
-        if (userDoc.exists && userDoc.data()!.containsKey('privateKey')) {
-          final restoredKey = userDoc.data()!['privateKey'];
-          await EcdhService.savePrivateKey(userId, restoredKey);
-          print("Private key successfully restored.");
-        } else {
-          throw Exception('Private key not found. Please register again.');
-        }
-      }
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Login Successful!')),
@@ -90,11 +100,17 @@ class _LoginPageState extends State<LoginPage> {
         }
       } else if (e.toString().contains('Private key not found')) {
         errorMessage = 'Private key missing. Please register again.';
+      } else if (e.toString().contains('cannot be decrypted')) {
+        errorMessage = 'Private key decryption failed. Please register again.';
       }
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(errorMessage)),
       );
+    } finally {
+      setState(() {
+        isLoggingIn = false;
+      });
     }
   }
 
@@ -169,9 +185,11 @@ class _LoginPageState extends State<LoginPage> {
                     width: double.infinity,
                     height: 52,
                     child: ElevatedButton(
-                      onPressed: () async {
-                        await loginUser();
-                      },
+                      onPressed: isLoggingIn
+                          ? null
+                          : () async {
+                              await loginUser();
+                            },
                       style: ElevatedButton.styleFrom(
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12),
@@ -180,14 +198,25 @@ class _LoginPageState extends State<LoginPage> {
                           vertical: 8,
                         ),
                         backgroundColor: const Color(0xFF1E1E1E),
+                        disabledBackgroundColor:
+                            const Color(0xFF1E1E1E).withOpacity(0.6),
                       ),
-                      child: Text(
-                        'Login',
-                        style: GoogleFonts.kanit(
-                            fontSize: 20,
-                            fontWeight: FontWeight.w400,
-                            color: const Color(0xFFFFFFFF)),
-                      ),
+                      child: isLoggingIn
+                          ? const SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(
+                                color: Colors.white,
+                                strokeWidth: 2.0,
+                              ),
+                            )
+                          : Text(
+                              'Login',
+                              style: GoogleFonts.kanit(
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w400,
+                                  color: const Color(0xFFFFFFFF)),
+                            ),
                     ),
                   ),
                   const SizedBox(
@@ -197,7 +226,7 @@ class _LoginPageState extends State<LoginPage> {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Text(
-                        'Already have an account? ',
+                        'Dont have an account? ',
                         style: GoogleFonts.kanit(
                           fontSize: 16,
                           fontWeight: FontWeight.w400,

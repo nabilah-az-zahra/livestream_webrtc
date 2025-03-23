@@ -47,8 +47,9 @@ class StreamKeyExchangeService {
       });
 
       // Get own private key
-      final privateKeyStr = await EcdhService.getPrivateKey(userId);
-      if (privateKeyStr == null) {
+      final Uint8List? privateKeyBytes =
+          await EcdhService.getPrivateKey(userId);
+      if (privateKeyBytes == null) {
         await _logKeyExchange(exchangeId, {
           'status': 'failed',
           'error': 'Private key not found',
@@ -59,7 +60,7 @@ class StreamKeyExchangeService {
 
       // Get other user's public key from Firestore
       final otherUserDoc = await FirebaseFirestore.instance
-          .collection('users')
+          .collection('user_keys')
           .doc(otherUserId)
           .get();
 
@@ -76,7 +77,6 @@ class StreamKeyExchangeService {
       print('Retrieved public key for $otherUserId successfully.');
 
       // Convert keys
-      final privateKeyBytes = EcdhService.stringToBytes(privateKeyStr);
       final publicKeyBytes =
           EcdhService.stringToBytes(otherUserDoc.data()!['publicKey']);
 
