@@ -47,8 +47,6 @@ class _MyProfilePageState extends State<MyProfilePage> {
                 const SizedBox(height: 20),
                 _buildStreamInfo(),
                 const SizedBox(height: 20),
-                _buildAchievements(),
-                const SizedBox(height: 20),
                 _buildLogoutButton(),
               ],
             ),
@@ -126,80 +124,42 @@ class _MyProfilePageState extends State<MyProfilePage> {
   }
 
   Widget _buildStreamInfo() {
-    return Card(
-      elevation: 2,
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Stream Information',
-              style: GoogleFonts.kanit(
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
+    return Container(
+      width: MediaQuery.of(context).size.width,
+      child: Card(
+        elevation: 2,
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Stream Information',
+                style: GoogleFonts.kanit(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Categories',
-              style: GoogleFonts.kanit(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
+              const SizedBox(height: 16),
+              Text(
+                'Categories',
+                style: GoogleFonts.kanit(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _buildCategoryChip('Chess'),
-                _buildCategoryChip('Art'),
-                _buildCategoryChip('DTI'),
-              ],
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Schedule',
-              style: GoogleFonts.kanit(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _buildCategoryChip('Chess'),
+                  _buildCategoryChip('Art'),
+                  _buildCategoryChip('Gaming'),
+                ],
               ),
-            ),
-            const SizedBox(height: 8),
-            _buildScheduleGrid(),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildAchievements() {
-    return Card(
-      elevation: 2,
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Achievements',
-              style: GoogleFonts.kanit(
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceAround,
-              children: [
-                _buildAchievementItem(Icons.favorite, 'Top Liked', Colors.red),
-                _buildAchievementItem(
-                    Icons.card_giftcard, 'Most Gifted', Colors.purple),
-                _buildAchievementItem(Icons.star, 'Top Streams', Colors.amber),
-              ],
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -226,15 +186,24 @@ class _MyProfilePageState extends State<MyProfilePage> {
                 ),
                 actions: [
                   TextButton(
+                    style: TextButton.styleFrom(
+                      backgroundColor: Colors.grey[300],
+                    ),
                     onPressed: () {
                       Navigator.pop(context);
                     },
                     child: Text(
-                      'No',
-                      style: GoogleFonts.kanit(color: Colors.blue),
+                      'Cancel',
+                      style: GoogleFonts.kanit(
+                        color: Colors.black,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
                   TextButton(
+                    style: TextButton.styleFrom(
+                      backgroundColor: Colors.red,
+                    ),
                     onPressed: () async {
                       await FirebaseAuth.instance.signOut();
                       if (mounted) {
@@ -247,7 +216,10 @@ class _MyProfilePageState extends State<MyProfilePage> {
                     },
                     child: Text(
                       'Yes',
-                      style: GoogleFonts.kanit(color: Colors.red),
+                      style: GoogleFonts.kanit(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
                 ],
@@ -324,38 +296,6 @@ class _MyProfilePageState extends State<MyProfilePage> {
         style: GoogleFonts.kanit(color: Colors.blue),
       ),
       backgroundColor: Colors.blue[50],
-    );
-  }
-
-  Widget _buildScheduleGrid() {
-    return GridView.count(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      crossAxisCount: 7,
-      children: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-          .map((day) => Card(
-                color: Colors.grey[200],
-                child: Center(
-                  child: Text(
-                    day,
-                    style: GoogleFonts.kanit(fontSize: 12),
-                  ),
-                ),
-              ))
-          .toList(),
-    );
-  }
-
-  Widget _buildAchievementItem(IconData icon, String text, Color color) {
-    return Column(
-      children: [
-        Icon(icon, color: color, size: 24),
-        const SizedBox(height: 8),
-        Text(
-          text,
-          style: GoogleFonts.kanit(fontSize: 12),
-        ),
-      ],
     );
   }
 }

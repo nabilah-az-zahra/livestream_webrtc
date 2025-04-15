@@ -158,62 +158,125 @@ class _RegisterPageState extends State<RegisterPage> {
                   const SizedBox(
                     height: 100,
                   ),
-                  TextField(
-                    controller: nameController,
-                    decoration: InputDecoration(
-                      hintText: 'Username',
-                      hintStyle: GoogleFonts.kanit(
-                          color: const Color(0xff1E1E1E).withOpacity(0.5)),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFD9D9D9),
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.2),
+                          offset: const Offset(2, 2),
+                          blurRadius: 4,
+                        ),
+                      ],
                     ),
-                  ),
-                  const SizedBox(
-                    height: 30,
-                  ),
-                  TextField(
-                    controller: emailController,
-                    decoration: InputDecoration(
-                      hintText: 'Email',
-                      hintStyle: GoogleFonts.kanit(
-                          color: const Color(0xff1E1E1E).withOpacity(0.5)),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(
-                    height: 30,
-                  ),
-                  TextField(
-                    controller: passwordController,
-                    obscureText: isObscure,
-                    decoration: InputDecoration(
-                      hintText: 'Password',
-                      hintStyle: GoogleFonts.kanit(
-                          color: const Color(0xff1E1E1E).withOpacity(0.5)),
-                      suffixIcon: GestureDetector(
-                        onTap: () {
-                          setState(() {
-                            isObscure = !isObscure;
-                          });
-                        },
-                        child: FittedBox(
-                          fit: BoxFit.scaleDown,
-                          child: isObscure
-                              ? const Icon(
-                                  Icons.visibility_off_outlined,
-                                  color: Color(0xFF1C1B1F),
-                                )
-                              : const Icon(
-                                  Icons.visibility_outlined,
-                                  color: Color(0xFF1C1B1F),
-                                ),
+                    child: TextField(
+                      controller: nameController,
+                      cursorColor: Colors.black,
+                      decoration: InputDecoration(
+                        hintText: 'Username',
+                        hintStyle: GoogleFonts.kanit(
+                            color: const Color(0xff1E1E1E).withOpacity(0.5)),
+                        enabledBorder: OutlineInputBorder(
+                          borderSide: BorderSide.none,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderSide:
+                              const BorderSide(color: Colors.black, width: 2),
+                          borderRadius: BorderRadius.circular(8),
                         ),
                       ),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                  const SizedBox(
+                    height: 20,
+                  ),
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFD9D9D9),
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.2),
+                          offset: const Offset(2, 2),
+                          blurRadius: 4,
+                        ),
+                      ],
+                    ),
+                    child: TextField(
+                      controller: emailController,
+                      cursorColor: Colors.black,
+                      decoration: InputDecoration(
+                        hintText: 'Email',
+                        hintStyle: GoogleFonts.kanit(
+                            color: const Color(0xff1E1E1E).withOpacity(0.5)),
+                        enabledBorder: OutlineInputBorder(
+                          borderSide: BorderSide.none,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderSide:
+                              const BorderSide(color: Colors.black, width: 2),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(
+                    height: 20,
+                  ),
+                  Container(
+                    margin: const EdgeInsets.only(bottom: 16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFD9D9D9),
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.2),
+                          offset: const Offset(2, 2),
+                          blurRadius: 4,
+                        ),
+                      ],
+                    ),
+                    child: TextField(
+                      controller: passwordController,
+                      cursorColor: Colors.black,
+                      obscureText: isObscure,
+                      decoration: InputDecoration(
+                        hintText: 'Password',
+                        hintStyle: GoogleFonts.kanit(
+                            color: const Color(0xff1E1E1E).withOpacity(0.5)),
+                        suffixIcon: GestureDetector(
+                          onTap: () {
+                            setState(() {
+                              isObscure = !isObscure;
+                            });
+                          },
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: isObscure
+                                ? const Icon(
+                                    Icons.visibility_off_outlined,
+                                    color: Color(0xFF1C1B1F),
+                                  )
+                                : const Icon(
+                                    Icons.visibility_outlined,
+                                    color: Color(0xFF1C1B1F),
+                                  ),
+                          ),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderSide: BorderSide.none,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderSide:
+                              const BorderSide(color: Colors.black, width: 2),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
                       ),
                     ),
                   ),

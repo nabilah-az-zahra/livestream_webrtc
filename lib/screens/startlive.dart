@@ -317,7 +317,7 @@ class _StartLivePageState extends State<StartLivePage> {
                     icon: const Icon(Icons.arrow_back, color: Colors.black),
                     onPressed: () => Navigator.pop(context),
                   ),
-                  const SizedBox(width: 8.0),
+                  const SizedBox(width: 16.0),
                   Text(
                     'Start Live',
                     style: GoogleFonts.kanit(
@@ -341,26 +341,59 @@ class _StartLivePageState extends State<StartLivePage> {
                         mirror: true,
                       )
                     : const Center(
-                        child: CircularProgressIndicator(),
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                        ),
                       ),
               ),
             ),
             Padding(
               padding:
                   const EdgeInsets.symmetric(vertical: 8.0, horizontal: 16.0),
-              child: TextField(
-                controller: _titleController,
-                decoration: const InputDecoration(
-                  labelText: 'Enter Live Stream Title',
-                  border: OutlineInputBorder(),
-                  filled: true,
-                  fillColor: Colors.white,
+              child: Container(
+                margin: const EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFD9D9D9),
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.2),
+                      offset: const Offset(2, 2),
+                      blurRadius: 4,
+                    ),
+                  ],
+                ),
+                child: TextField(
+                  controller: _titleController,
+                  cursorColor: Colors.black,
+                  decoration: InputDecoration(
+                    hintText: 'Enter Live Stream Title',
+                    enabledBorder: OutlineInputBorder(
+                      borderSide: BorderSide.none,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderSide:
+                          const BorderSide(color: Colors.black, width: 2),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    filled: true,
+                    fillColor: Colors.white,
+                  ),
                 ),
               ),
             ),
             Padding(
-              padding: const EdgeInsets.all(16.0),
+              padding: const EdgeInsets.all(20.0),
               child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.black,
+                  padding:
+                      const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
                 onPressed: _isSettingUp
                     ? null
                     : () async {
@@ -380,12 +413,15 @@ class _StartLivePageState extends State<StartLivePage> {
                         _startLive();
                       },
                 child: _isSettingUp
-                    ? const CircularProgressIndicator()
+                    ? const CircularProgressIndicator(
+                        color: Colors.black,
+                      )
                     : Text(
                         'Start Live',
                         style: GoogleFonts.kanit(
                           fontSize: 18,
                           fontWeight: FontWeight.bold,
+                          color: Colors.white,
                         ),
                       ),
               ),

@@ -116,33 +116,98 @@ class _HomePageState extends State<HomePage> {
   void _showLoginRequiredPopup() {
     showDialog(
       context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: Text('Login Required', style: GoogleFonts.kanit()),
-          content: Text('You need to register/login to watch live streams.',
-              style: GoogleFonts.kanit()),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => const LoginPage()),
-                );
-              },
-              child: Text('Login', style: GoogleFonts.kanit()),
+      builder: (BuildContext context) {
+        return Dialog(
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  "You need to have an account to start and watch streams.",
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.kanit(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 24),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const RegisterPage(),
+                        ),
+                      );
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: Text(
+                      "Register",
+                      style: GoogleFonts.kanit(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 18,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  "OR",
+                  style: GoogleFonts.kanit(
+                    fontSize: 12,
+                    color: Colors.grey[600],
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  "Already have an account?",
+                  style: GoogleFonts.kanit(
+                    fontSize: 14,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => const LoginPage(),
+                        ),
+                      );
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.grey[300],
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    child: Text(
+                      "Login",
+                      style: GoogleFonts.kanit(
+                          color: Colors.black87,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 18),
+                    ),
+                  ),
+                ),
+              ],
             ),
-            TextButton(
-              onPressed: () {
-                Navigator.pop(context);
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (context) => const RegisterPage()),
-                );
-              },
-              child: Text('Register', style: GoogleFonts.kanit()),
-            ),
-          ],
+          ),
         );
       },
     );
@@ -360,7 +425,10 @@ class _HomePageState extends State<HomePage> {
                     .snapshots(),
                 builder: (context, snapshot) {
                   if (snapshot.connectionState == ConnectionState.waiting) {
-                    return const Center(child: CircularProgressIndicator());
+                    return const Center(
+                        child: CircularProgressIndicator(
+                      color: Colors.black,
+                    ));
                   }
 
                   if (snapshot.hasError) {
@@ -409,7 +477,7 @@ class _HomePageState extends State<HomePage> {
                   backgroundColor: Colors.black,
                 ),
                 child: const Icon(
-                  Icons.add_box_outlined,
+                  Icons.add,
                   color: Colors.white,
                   size: 24.0,
                 ),

@@ -879,6 +879,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
                 Expanded(
                   child: TextField(
                     controller: _chatController,
+                    cursorColor: Colors.white,
                     focusNode: _chatFocusNode,
                     style: const TextStyle(color: Colors.white),
                     decoration: InputDecoration(
@@ -929,38 +930,39 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       return Scaffold(
         appBar: AppBar(title: const Text('Live Stream')),
         body: const Center(
-          child: CircularProgressIndicator(),
+          child: CircularProgressIndicator(
+            color: Colors.white,
+          ),
         ),
       );
     }
 
     final screenSize = MediaQuery.of(context).size;
-    final videoHeight = screenSize.height * 0.4;
+    // final videoHeight = screenSize.height * 0.4;
 
     return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.white),
-          onPressed: () => Navigator.pop(context),
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.settings, color: Colors.white),
-            onPressed: () {},
-          ),
-        ],
-      ),
+      backgroundColor: const Color(0xFFE5E5E5),
+      // appBar: AppBar(
+      //   backgroundColor: Colors.transparent,
+      //   elevation: 0,
+      //   leading: IconButton(
+      //     icon: const Icon(Icons.arrow_back, color: Colors.black),
+      //     onPressed: () => Navigator.pop(context),
+      //   ),
+      //   actions: [
+      //     IconButton(
+      //       icon: const Icon(Icons.settings, color: Colors.black),
+      //       onPressed: () {},
+      //     ),
+      //   ],
+      // ),
       body: Column(
         children: [
-          SizedBox(
-            height: videoHeight,
-            width: double.infinity,
-            child: Stack(
-              children: [
-                Container(
+          Stack(
+            children: [
+              AspectRatio(
+                aspectRatio: 16 / 9,
+                child: Container(
                   color: Colors.black,
                   child: widget.isStreamer
                       ? RTCVideoView(
@@ -976,39 +978,83 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
                           mirror: false,
                         ),
                 ),
-                if (!widget.isStreamer && !_remoteVideoConnected)
-                  const Center(
-                    child: CircularProgressIndicator(color: Colors.white),
+              ),
+              SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.arrow_back, color: Colors.white),
+                        onPressed: () => Navigator.pop(context),
+                      ),
+                      // IconButton(
+                      //   icon: const Icon(Icons.fullscreen, color: Colors.white),
+                      //   onPressed: () {
+                      //     //  fullscreen toggle
+                      //   },
+                      // ),
+                    ],
                   ),
-                Positioned(
-                  left: 16,
-                  bottom: 16,
+                ),
+              ),
+              SafeArea(
+                child: Align(
+                  alignment: Alignment.topRight,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: IconButton(
+                      icon: const Icon(Icons.settings, color: Colors.white),
+                      onPressed: () {
+                        //  settings
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (!widget.isStreamer && !_remoteVideoConnected)
+            const Center(
+              child: CircularProgressIndicator(color: Colors.white),
+            ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            color: const Color(0xFFE5E5E5),
+            child: Row(
+              children: [
+                Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
                         widget.streamTitle,
                         style: GoogleFonts.inter(
-                          color: Colors.white,
-                          fontSize: 20,
+                          color: Colors.black,
+                          fontSize: 16,
                           fontWeight: FontWeight.w600,
                         ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
+                      const SizedBox(height: 4),
                       Row(
                         children: [
                           CircleAvatar(
                             radius: 12,
-                            backgroundColor: Colors.grey[800],
+                            backgroundColor: Colors.black,
                             child: Text(
                               widget.streamerUsername[0].toUpperCase(),
-                              style: const TextStyle(fontSize: 12),
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.white),
                             ),
                           ),
                           const SizedBox(width: 8),
                           Text(
                             widget.streamerUsername,
                             style: GoogleFonts.inter(
-                              color: Colors.white70,
+                              color: Colors.black87,
                               fontSize: 14,
                             ),
                           ),
