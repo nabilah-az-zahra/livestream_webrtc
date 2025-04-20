@@ -6,6 +6,7 @@ import 'dart:math' as math;
 import 'dart:convert';
 import 'package:livestream_webrtc/exchange_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:livestream_webrtc/logger.dart';
 
 class StreamCryptoService {
   static const int nonceLength = 12; // 96 bits for GCM
@@ -96,6 +97,8 @@ class StreamCryptoService {
         final cipher = _createAesGcmCipher(true, aesKey, nonce);
         final encryptedData = cipher.process(frameData);
 
+        final stopwatch = Stopwatch()..start();
+
         // Append nonce + encrypted frame for transmission
         final encryptedFrame = Uint8List(nonceLength + encryptedData.length);
         encryptedFrame.setAll(0, nonce);
@@ -105,7 +108,18 @@ class StreamCryptoService {
         final encodedMessage = base64.encode(encryptedFrame);
         channel.send(RTCDataChannelMessage(encodedMessage));
 
-        print('Encrypted Frame Sent: ${encryptedFrame.length} bytes');
+        stopwatch.stop();
+
+        final durationMs = stopwatch.elapsedMilliseconds;
+
+        // print('Encrypted Frame Sent: ${encryptedFrame.length} bytes');
+        EncryptionLogger.logEncryption(
+          streamId,
+          frameData.length,
+          encryptedFrame.length,
+          durationMs,
+          success: true,
+        );
 
         // Log successful encryption
         await StreamCryptoLogger.logFrame(
@@ -152,11 +166,18 @@ class StreamCryptoService {
         final aesKey = await StreamKeyExchangeService.getStreamKey(streamId);
         if (aesKey == null) throw Exception('Decryption key not found');
 
+        final stopwatch = Stopwatch()..start();
+
         // Decrypt frame data
         final cipher = _createAesGcmCipher(false, aesKey, nonce);
         final decryptedData = cipher.process(ciphertext);
 
-        print('Decrypted Frame Received: ${decryptedData.length} bytes');
+        stopwatch.stop();
+
+        final durationMs = stopwatch.elapsedMilliseconds;
+
+        // print('Decrypted Frame Received: ${decryptedData.length} bytes');
+        EncryptionLogger.logDecryption(streamId, durationMs, success: true);
       } catch (e) {
         print('Error decrypting frame: $e');
       }
@@ -187,7 +208,7 @@ class StreamCryptoService {
   // Helper to verify encryption is working with current key
   static Future<bool> verifyEncryption(String streamId) async {
     try {
-      print('Verifying encryption for stream: $streamId');
+      // print('Verifying encryption for stream: $streamId');
 
       final aesKey = await StreamKeyExchangeService.getStreamKey(streamId);
       if (aesKey == null) {
@@ -221,7 +242,7 @@ class StreamCryptoService {
       final aadBytes = aad.buffer.asUint8List();
 
       // Test encryption
-      print('Attempting to encrypt test data...');
+      // print('Attempting to encrypt test data...');
       final encryptCipher =
           _createAesGcmCipher(true, aesKey, nonce, aad: aadBytes);
       if (encryptCipher == null) {
@@ -229,13 +250,13 @@ class StreamCryptoService {
         return false;
       }
 
-      print('Attempting to encrypt test data...');
+      // print('Attempting to encrypt test data...');
       final encrypted = encryptCipher.process(testData);
-      print(
-          'Test encryption successful. Encrypted length: ${encrypted.length} bytes');
+      // print(
+      //     'Test encryption successful. Encrypted length: ${encrypted.length} bytes');
 
       // Test decryption
-      print('Attempting to decrypt test data...');
+      // print('Attempting to decrypt test data...');
       final decryptCipher =
           _createAesGcmCipher(false, aesKey, nonce, aad: aadBytes);
       if (decryptCipher == null) {
@@ -243,10 +264,10 @@ class StreamCryptoService {
         return false;
       }
 
-      print('Attempting to decrypt test data...');
+      // print('Attempting to decrypt test data...');
       final decrypted = decryptCipher.process(encrypted);
-      print(
-          'Test decryption successful. Decrypted length: ${decrypted.length} bytes');
+      // print(
+      //     'Test decryption successful. Decrypted length: ${decrypted.length} bytes');
 
       // Verify the round trip
       if (!listEquals(testData, decrypted)) {
@@ -267,7 +288,7 @@ class StreamCryptoService {
         },
       );
 
-      print('Encryption verification successful for stream $streamId');
+      // print('Encryption verification successful for stream $streamId');
 
       return true;
     } catch (e, stackTrace) {

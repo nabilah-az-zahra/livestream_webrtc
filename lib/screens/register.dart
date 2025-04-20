@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:livestream_webrtc/screens/login.dart';
 import 'package:livestream_webrtc/ecdh_service.dart';
+import 'package:livestream_webrtc/logger.dart';
 
 bool isObscure = false;
 
@@ -80,9 +81,11 @@ class _RegisterPageState extends State<RegisterPage> {
 
       // Log successful key generation and storage
       print('Key generation successful:');
-      print('- Private key length: ${privateKeyResult['keyLength']}');
-      print('- Private key preview: ${verifyResult['keyPreview']}');
-      print('- Public key length: ${publicKeyResult['keyLength']}');
+      // print('- Private key length: ${privateKeyResult['keyLength']}');
+      // print('- Private key preview: ${verifyResult['keyPreview']}');
+      // print('- Public key length: ${publicKeyResult['keyLength']}');
+      EncryptionLogger.logKeyGeneration(
+          userId: userId, publicKeyPreview: publicKeyBytes.take(8).join(','));
 
       await FirebaseFirestore.instance.collection('users').doc(userId).set({
         'username': username,

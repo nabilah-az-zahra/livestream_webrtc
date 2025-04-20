@@ -5,6 +5,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'dart:convert';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:livestream_webrtc/ecdh_service.dart';
+import 'package:livestream_webrtc/logger.dart';
 
 class StreamKeyExchangeService {
   static final algorithm = X25519();
@@ -104,11 +105,17 @@ class StreamKeyExchangeService {
       // Generate AES key by hashing shared secret with SHA-256
       final aesKey = crypto.sha256.convert(sharedSecretBytes).bytes;
 
+      EncryptionLogger.logSharedSecretDerived(
+        userId,
+        streamId,
+        aesKey.take(8).toString(), // AES key preview for reporting/logging
+      );
+
       // Store the AES key
       final streamKeyId = 'stream_key_$streamId';
       await secureStorage.write(key: streamKeyId, value: base64.encode(aesKey));
 
-      print('AES key stored successfully for stream: $streamId');
+      // print('AES key stored successfully for stream: $streamId');
 
       final storedKey = await secureStorage.read(key: streamKeyId);
       if (storedKey == null) {
@@ -156,7 +163,7 @@ class StreamKeyExchangeService {
         ...data,
         'timestamp': FieldValue.serverTimestamp(),
       });
-      print('Key exchange log successfully written.');
+      // print('Key exchange log successfully written.');
     } catch (e) {
       print('Error logging key exchange: $e');
     }

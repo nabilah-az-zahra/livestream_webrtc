@@ -10,6 +10,7 @@ import 'package:livestream_webrtc/signaling.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:livestream_webrtc/exchange_service.dart';
 import 'package:livestream_webrtc/e2ee_service.dart';
+import 'package:livestream_webrtc/logger.dart';
 
 class LiveStreamPage extends StatefulWidget {
   final String streamTitle;
@@ -91,7 +92,7 @@ class ConnectionMonitor {
   void _setupConnectionMonitoring() {
     // Monitor connection state changes
     peerConnection.onConnectionState = (RTCPeerConnectionState state) {
-      print('Connection state changed to: $state');
+      // print('Connection state changed to: $state');
 
       switch (state) {
         case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
@@ -119,7 +120,7 @@ class ConnectionMonitor {
   }
 
   void _handleDisconnection() {
-    print('Connection lost, attempting to recover...');
+    // print('Connection lost, attempting to recover...');
     onConnectionLost();
 
     if (_reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
@@ -127,14 +128,14 @@ class ConnectionMonitor {
         _attemptReconnection();
       });
     } else {
-      print('Max reconnection attempts reached');
+      // print('Max reconnection attempts reached');
     }
   }
 
   Future<void> _attemptReconnection() async {
     _reconnectAttempts++;
-    print(
-        'Attempting reconnection (${_reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})');
+    // print(
+    //     'Attempting reconnection (${_reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})');
 
     try {
       final offer = await peerConnection.createOffer({
@@ -175,7 +176,7 @@ class ConnectionMonitor {
       });
 
       if (!hasActiveDataChannel) {
-        print('Data channel appears to be closed, attempting recovery...');
+        // print('Data channel appears to be closed, attempting recovery...');
         _handleDisconnection();
       }
     }
@@ -270,12 +271,20 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         true,
       );
     } else {
+      final viewerId = FirebaseAuth.instance.currentUser?.uid ?? 'unknown';
+      final streamerId = widget.streamerId;
+
       await StreamCryptoService.decryptRtpReceiver(
         _encryptedVideoChannel!,
         widget.streamId,
         FirebaseAuth.instance.currentUser!.uid,
         widget.streamerId,
         false,
+      );
+
+      EncryptionLogger.logEndToEndFlow(
+        streamerId: streamerId,
+        viewerId: viewerId,
       );
     }
   }
@@ -318,9 +327,9 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         );
 
         if (verification['verified']) {
-          print('Exchange verified successfully');
-          print('Exchange details: ${verification['exchange']}');
-          print('Exchange logs: ${verification['logs']}');
+          // print('Exchange verified successfully');
+          // print('Exchange details: ${verification['exchange']}');
+          // print('Exchange logs: ${verification['logs']}');
         } else {
           throw Exception('Key exchange verification failed');
         }
@@ -435,7 +444,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
 
       // Set up connection state monitoring
       peerConnection.onConnectionState = (RTCPeerConnectionState state) {
-        print('Connection state for $viewerId: $state');
+        // print('Connection state for $viewerId: $state');
         if (state ==
                 RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
             state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
@@ -445,11 +454,11 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       };
 
       peerConnection.onIceGatheringState = (RTCIceGatheringState state) {
-        print('ICE gathering state for $viewerId: $state');
+        // print('ICE gathering state for $viewerId: $state');
       };
 
       peerConnection.onSignalingState = (RTCSignalingState state) {
-        print('Signaling state for $viewerId: $state');
+        // print('Signaling state for $viewerId: $state');
       };
 
       peerConnection.onIceCandidate = (RTCIceCandidate? candidate) {
@@ -473,7 +482,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       _signalingService.joinStream(widget.streamId, true);
 
       _signalingService.onViewerJoined((viewerId) async {
-        print('Setting up connection for viewer: $viewerId');
+        // print('Setting up connection for viewer: $viewerId');
 
         final peerConnection = await _initPeerConnection(viewerId);
         if (peerConnection == null) return;
@@ -485,7 +494,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         await Future.delayed(const Duration(milliseconds: 1000));
 
         if (_localStream != null) {
-          print('Adding local stream tracks');
+          // print('Adding local stream tracks');
           for (final track in _localStream!.getTracks()) {
             await peerConnection.addTrack(track, _localStream!);
           }
@@ -498,12 +507,12 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
             'iceRestart': true
           });
 
-          print('Created offer, setting local description');
+          // print('Created offer, setting local description');
           await peerConnection.setLocalDescription(offer);
 
           await _waitForIceGathering(peerConnection);
 
-          print('Sending offer to viewer: $viewerId');
+          // print('Sending offer to viewer: $viewerId');
           _signalingService.sendOffer(widget.streamId, viewerId, offer);
         } catch (e) {
           print('Error in connection setup: $e');
@@ -513,7 +522,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
 
       _signalingService.onAnswer((data) async {
         final viewerId = data['viewerId'];
-        print('Received answer from viewer: $viewerId');
+        // print('Received answer from viewer: $viewerId');
 
         if (_isDisposed || _connectionStates[viewerId] != true) return;
 
@@ -528,7 +537,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
               data['answer']['type'],
             );
             await peerConnection.setRemoteDescription(answer);
-            print('Remote description set for viewer: $viewerId');
+            // print('Remote description set for viewer: $viewerId');
           }
         } catch (e) {
           print('Error handling answer from $viewerId: $e');
@@ -553,7 +562,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
               int.parse(candidateData['sdpMLineIndex']?.toString() ?? '0'),
             );
             await peerConnection.addCandidate(candidate);
-            print('ICE candidate added for viewer: $viewerId');
+            // print('ICE candidate added for viewer: $viewerId');
           }
         } catch (e) {
           print('Error handling ICE candidate for $viewerId: $e');
@@ -603,17 +612,17 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       );
       await _setupEncryptedDataChannel(_peerConnection!);
 
-      print('Setting up viewer connection');
+      // print('Setting up viewer connection');
 
       _peerConnection?.onIceCandidate = (candidate) {
         if (candidate != null) {
-          print('Viewer sending ICE candidate: ${candidate.candidate}');
+          // print('Viewer sending ICE candidate: ${candidate.candidate}');
           _signalingService.sendIceCandidate(widget.streamId, candidate);
         }
       };
 
       _peerConnection?.onTrack = (RTCTrackEvent event) {
-        print('Received track: ${event.track.kind}');
+        // print('Received track: ${event.track.kind}');
         if (event.streams.isNotEmpty) {
           setState(() {
             _remoteStream = event.streams[0];
@@ -629,7 +638,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       _signalingService.joinStream(widget.streamId, false);
 
       _signalingService.onOffer((data) async {
-        print('Received offer from streamer');
+        // print('Received offer from streamer');
         if (data['type'] != null && data['sdp'] != null) {
           try {
             final offer = RTCSessionDescription(data['sdp'], data['type']);
@@ -637,7 +646,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
             _remoteDescriptionSet = true;
 
             if (_pendingCandidates.isNotEmpty) {
-              print('Adding ${_pendingCandidates.length} pending candidates');
+              // print('Adding ${_pendingCandidates.length} pending candidates');
               for (var candidate in _pendingCandidates) {
                 await _peerConnection?.addCandidate(candidate);
               }
@@ -662,7 +671,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       _signalingService.onIceCandidate((data) async {
         try {
           if (data['candidate'] != null) {
-            print('Received ICE candidate from streamer');
+            // print('Received ICE candidate from streamer');
             final candidateData = data['candidate'];
             final candidate = RTCIceCandidate(
               candidateData['candidate'],
@@ -673,7 +682,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
             if (_remoteDescriptionSet) {
               await _peerConnection?.addCandidate(candidate);
             } else {
-              print('Storing ICE candidate for later');
+              // print('Storing ICE candidate for later');
               _pendingCandidates.add(candidate);
             }
           }
@@ -694,7 +703,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       try {
         await peerConnection.close();
         await peerConnection.dispose();
-        print('Cleaned up connection for viewer: $viewerId');
+        // print('Cleaned up connection for viewer: $viewerId');
       } catch (e) {
         print('Error cleaning up connection for $viewerId: $e');
       }

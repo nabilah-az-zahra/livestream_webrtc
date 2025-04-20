@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:crypto/crypto.dart' as crypto;
+import 'package:livestream_webrtc/logger.dart';
 
 class EcdhService {
   static final algorithm = X25519();
@@ -13,7 +14,6 @@ class EcdhService {
 
   // Password-based key derivation function
   static SecretKey _deriveKeyFromPassword(String password, String salt) {
-    // Use PBKDF2 or similar - this is a simplified version
     final keyMaterial = utf8.encode(password + salt);
     final hash = crypto.sha256.convert(keyMaterial);
     return SecretKey(Uint8List.fromList(hash.bytes));
@@ -25,6 +25,11 @@ class EcdhService {
       final keyPair = await algorithm.newKeyPair();
       final publicKey = await keyPair.extractPublicKey();
       final privateKeyBytes = await keyPair.extractPrivateKeyBytes();
+
+      EncryptionLogger.logKeyGeneration(
+        userId: FirebaseAuth.instance.currentUser?.uid ?? 'unknown',
+        publicKeyPreview: publicKey.bytes.take(8).toString(),
+      );
 
       return {
         'keyPair': keyPair,
@@ -141,7 +146,10 @@ class EcdhService {
         return {'success': false, 'error': 'Failed to encrypt private key'};
       }
 
+      final user = FirebaseAuth.instance.currentUser;
+
       await FirebaseFirestore.instance.collection('user_keys').doc(userId).set({
+        'email': user?.email,
         'encryptedPrivateKey':
             bytesToString(encryptionResult['encryptedPrivateKey']),
         'nonce': bytesToString(encryptionResult['nonce']),

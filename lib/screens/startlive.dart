@@ -7,6 +7,7 @@ import 'package:livestream_webrtc/exchange_service.dart';
 import 'package:livestream_webrtc/screens/livestream.dart';
 import 'package:livestream_webrtc/signaling.dart';
 import 'package:livestream_webrtc/e2ee_service.dart';
+import 'package:livestream_webrtc/logger.dart';
 
 class StartLivePage extends StatefulWidget {
   const StartLivePage({super.key});
@@ -109,14 +110,14 @@ class _StartLivePageState extends State<StartLivePage> {
       );
 
       // Verify encryption is working
-      print('Attempting to verify stream encryption...');
+      // print('Attempting to verify stream encryption...');
       final encryptionVerified =
           await StreamCryptoService.verifyEncryption(streamId);
       if (!encryptionVerified) {
         throw Exception(
             'Stream encryption verification failed. Check logs for details.');
       }
-      print('Stream encryption verified successfully');
+      // print('Stream encryption verified successfully');
 
       setState(() {
         _isEncryptionReady = true;
@@ -137,6 +138,10 @@ class _StartLivePageState extends State<StartLivePage> {
 
       // Handle viewer connections
       _signalingService.onViewerJoined((viewerId) async {
+        EncryptionLogger.logEndToEndFlow(
+          streamerId: FirebaseAuth.instance.currentUser?.uid ?? 'unknown',
+          viewerId: viewerId,
+        );
         if (_peerConnection != null) {
           RTCSessionDescription offer = await _peerConnection!.createOffer();
           await _peerConnection!.setLocalDescription(offer);
@@ -179,7 +184,7 @@ class _StartLivePageState extends State<StartLivePage> {
       final String streamerId = currentUser.uid;
       final String streamerUsername = currentUser.displayName ?? 'Unknown';
 
-      print('Using streamId: $streamId for key exchange');
+      // print('Using streamId: $streamId for key exchange');
 
       // Generate and store the stream key first
       final keyExchange = await StreamKeyExchangeService.generateSharedSecret(
@@ -205,9 +210,18 @@ class _StartLivePageState extends State<StartLivePage> {
         throw Exception('Key exchange verification failed');
       }
 
-      print('Exchange verified successfully');
-      print('Exchange details: ${verification['exchange']}');
-      print('Exchange logs: ${verification['logs']}');
+      // print('Exchange verified successfully');
+      // print('Exchange details: ${verification['exchange']}');
+      // print('Exchange logs: ${verification['logs']}');
+
+      EncryptionLogger.logMessage(
+          '[KEY_EXCHANGE] Exchange verified successfully.');
+      if (verification['logs'] != null && verification['logs'].isNotEmpty) {
+        EncryptionLogger.logMessage(
+            '[KEY_EXCHANGE] Log status: ${verification['logs'][0]['status']}');
+      } else {
+        EncryptionLogger.logMessage('[KEY_EXCHANGE] No logs available');
+      }
 
       // Setup peer connection with encryption
       await _setupPeerConnection(streamId);
