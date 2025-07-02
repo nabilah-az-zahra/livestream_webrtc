@@ -39,7 +39,9 @@ class _LoginPageState extends State<LoginPage> {
       final userId = userCredential.user!.uid;
       final password = passwordController.text.trim();
 
-      // Verify private key exists on device
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'unknown';
+      final username = FirebaseAuth.instance.currentUser?.displayName ?? uid;
+
       final verifyResult = await EcdhService.verifyPrivateKey(userId);
       if (!verifyResult['exists']) {
         throw Exception('Private key not found. Please register again.');
@@ -48,10 +50,8 @@ class _LoginPageState extends State<LoginPage> {
       Uint8List? privateKeyBytes;
 
       if (verifyResult['source'] == 'local_storage') {
-        // If key is in local storage, we can retrieve it directly
         privateKeyBytes = await EcdhService.getPrivateKeyFromStorage(userId);
       } else {
-        // If key is in Firebase, we need to decrypt it with the password
         privateKeyBytes =
             await EcdhService.getPrivateKey(userId, password: password);
       }
@@ -61,7 +61,6 @@ class _LoginPageState extends State<LoginPage> {
             'Failed to retrieve private key. Please register again.');
       }
 
-      // Update user status in Firestore
       await FirebaseFirestore.instance.collection('users').doc(userId).update({
         'userMetadata': {
           'lastLogin': FieldValue.serverTimestamp(),
@@ -73,7 +72,14 @@ class _LoginPageState extends State<LoginPage> {
         }
       });
 
-      print('Login successful for user: $userId');
+      print('Login successful for user: $username');
+
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        await EcdhService.ensureUserHasKeyPair(user.uid);
+      }
+
+      await Future.delayed(const Duration(milliseconds: 500));
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Login Successful!')),

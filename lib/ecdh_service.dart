@@ -5,31 +5,29 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:crypto/crypto.dart' as crypto;
-import 'package:livestream_webrtc/logger.dart';
 
 class EcdhService {
   static final algorithm = X25519();
   static const secureStorage = FlutterSecureStorage();
   static final aesGcm = AesGcm.with256bits();
 
-  // Password-based key derivation function
   static SecretKey _deriveKeyFromPassword(String password, String salt) {
     final keyMaterial = utf8.encode(password + salt);
     final hash = crypto.sha256.convert(keyMaterial);
     return SecretKey(Uint8List.fromList(hash.bytes));
   }
 
-  // Generate key pair with verification
   static Future<Map<String, dynamic>> generateKeyPair() async {
     try {
       final keyPair = await algorithm.newKeyPair();
       final publicKey = await keyPair.extractPublicKey();
       final privateKeyBytes = await keyPair.extractPrivateKeyBytes();
 
-      EncryptionLogger.logKeyGeneration(
-        userId: FirebaseAuth.instance.currentUser?.uid ?? 'unknown',
-        publicKeyPreview: publicKey.bytes.take(8).toString(),
-      );
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'unknown';
+      final username = FirebaseAuth.instance.currentUser?.displayName ?? uid;
+
+      print('[ECDH] [$username] Private key generated successfully');
+      print('[ECDH] [$username] Public key generated successfully');
 
       return {
         'keyPair': keyPair,
@@ -43,11 +41,9 @@ class EcdhService {
     }
   }
 
-  // Get device encryption key - revised to support cross-device usage
   static Future<SecretKey> _getEncryptionKey(
       String userId, String password) async {
     try {
-      // Derive a consistent key from the user's password and user ID
       return _deriveKeyFromPassword(password, userId);
     } catch (e) {
       print('Error getting encryption key: $e');
@@ -55,19 +51,13 @@ class EcdhService {
     }
   }
 
-  // Encrypt private key using AES-256-GCM with password-derived key
   static Future<Map<String, dynamic>> encryptPrivateKey(
       String userId, String password, Uint8List privateKeyBytes) async {
     try {
       final encryptionKey = await _getEncryptionKey(userId, password);
-
-      // Generate a random nonce
       final nonce = aesGcm.newNonce();
-
-      // Additional authentication data (user ID)
       final aad = utf8.encode(userId);
 
-      // Encrypt the private key
       final encryptionResult = await aesGcm.encrypt(
         privateKeyBytes,
         secretKey: encryptionKey,
@@ -87,7 +77,6 @@ class EcdhService {
     }
   }
 
-  // Decrypt private key using AES-256-GCM with password-derived key
   static Future<Map<String, dynamic>> decryptPrivateKey(
       String userId,
       String password,
@@ -96,25 +85,20 @@ class EcdhService {
       Uint8List mac) async {
     try {
       final encryptionKey = await _getEncryptionKey(userId, password);
-
-      // Additional authentication data (user ID)
       final aad = utf8.encode(userId);
 
-      // Create the encrypted value with MAC
       final encryptedValue = SecretBox(
         encryptedPrivateKey,
         nonce: nonce,
         mac: Mac(mac),
       );
 
-      // Decrypt the private key
       final decryptedPrivateKey = await aesGcm.decrypt(
         encryptedValue,
         secretKey: encryptionKey,
         aad: aad,
       );
 
-      // Store the decrypted private key in local secure storage for future use
       await secureStorage.write(
         key: 'private_key_$userId',
         value: bytesToString(Uint8List.fromList(decryptedPrivateKey)),
@@ -130,7 +114,6 @@ class EcdhService {
     }
   }
 
-  // Save both private and public keys to Firebase
   static Future<Map<String, dynamic>> savePrivateKey(
       String userId, String password, Uint8List privateKeyBytes) async {
     try {
@@ -147,20 +130,21 @@ class EcdhService {
       }
 
       final user = FirebaseAuth.instance.currentUser;
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'unknown';
+      final username = FirebaseAuth.instance.currentUser?.displayName ?? uid;
+
+      print('[ECDH] [$username] Private key stored securely');
 
       await FirebaseFirestore.instance.collection('user_keys').doc(userId).set({
         'email': user?.email,
         'encryptedPrivateKey':
             bytesToString(encryptionResult['encryptedPrivateKey']),
-        'nonce': bytesToString(encryptionResult['nonce']),
         'mac': bytesToString(encryptionResult['mac']),
-        'updatedAt': FieldValue.serverTimestamp(),
-        'keyLength': privateKeyBytes.length,
-        'algorithm': 'AES-256-GCM',
-        'encryptionMethod': 'Password-derived key',
+        'nonce': bytesToString(encryptionResult['nonce']),
+        'privateKeyLength': privateKeyBytes.length,
+        'privateKeyUpdatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
-      // Verify the key was saved
       final doc = await FirebaseFirestore.instance
           .collection('user_keys')
           .doc(userId)
@@ -183,7 +167,6 @@ class EcdhService {
     }
   }
 
-  // Save public key with verification
   static Future<Map<String, dynamic>> savePublicKey(
       String userId, Uint8List publicKeyBytes) async {
     try {
@@ -208,6 +191,11 @@ class EcdhService {
         };
       }
 
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? 'unknown';
+      final username = FirebaseAuth.instance.currentUser?.displayName ?? uid;
+
+      print('[ECDH] [$username] Public key stored securely');
+
       return {
         'success': true,
         'keyLength': publicKeyBytes.length,
@@ -218,7 +206,6 @@ class EcdhService {
     }
   }
 
-  // Check if private key exists in local storage first
   static Future<Uint8List?> getPrivateKeyFromStorage(String userId) async {
     try {
       final storedKey = await secureStorage.read(key: 'private_key_$userId');
@@ -232,10 +219,8 @@ class EcdhService {
     }
   }
 
-  // Verify private key accessibility
   static Future<Map<String, dynamic>> verifyPrivateKey(String userId) async {
     try {
-      // First check local secure storage
       final localKey = await getPrivateKeyFromStorage(userId);
       if (localKey != null) {
         final prefix = localKey.sublist(0, min(4, localKey.length));
@@ -251,7 +236,6 @@ class EcdhService {
         };
       }
 
-      // If not in local storage, check Firebase
       final doc = await FirebaseFirestore.instance
           .collection('user_keys')
           .doc(userId)
@@ -260,8 +244,6 @@ class EcdhService {
       if (!doc.exists || !doc.data()!.containsKey('encryptedPrivateKey')) {
         return {'exists': false, 'error': 'No private key found for this user'};
       }
-
-      // Key exists in Firebase but will need password to decrypt
       return {
         'exists': true,
         'recoverable': true,
@@ -274,23 +256,17 @@ class EcdhService {
     }
   }
 
-  // Get private key - checks local storage first, then Firebase
   static Future<Uint8List?> getPrivateKey(String userId,
       {String? password}) async {
     try {
-      // First check local secure storage
       final localKey = await getPrivateKeyFromStorage(userId);
       if (localKey != null) {
         return localKey;
       }
-
-      // If not in local storage and no password provided, we can't proceed
       if (password == null) {
         print('Private key not in local storage and no password provided');
         return null;
       }
-
-      // Try to retrieve from Firebase and decrypt with password
       final doc = await FirebaseFirestore.instance
           .collection('user_keys')
           .doc(userId)
@@ -304,16 +280,12 @@ class EcdhService {
           stringToBytes(doc.data()!['encryptedPrivateKey']);
       final nonce = stringToBytes(doc.data()!['nonce']);
       final mac = stringToBytes(doc.data()!['mac']);
-
-      // Decrypt the private key using the password
       final decryptResult = await decryptPrivateKey(
           userId, password, encryptedPrivateKey, nonce, mac);
 
       if (!decryptResult['success']) {
         return null;
       }
-
-      // The decryption method already stores the key in secure storage
       return decryptResult['privateKeyBytes'];
     } catch (e) {
       print('Error getting private key: $e');
@@ -321,7 +293,52 @@ class EcdhService {
     }
   }
 
-  // Helper methods
+  static Future<void> ensureUserHasKeyPair(String userId) async {
+    final hasPrivate = await EcdhService.verifyPrivateKey(userId);
+    final publicDoc = await FirebaseFirestore.instance
+        .collection('user_keys')
+        .doc(userId)
+        .get();
+
+    if (hasPrivate['exists'] && publicDoc.exists) {
+      print('[ECDH] Key pair already exists for $userId');
+      return;
+    }
+
+    print('[ECDH] Key pair missing. Generating now...');
+    final result = await EcdhService.generateKeyPair();
+    if (!result['success']) throw Exception(result['error']);
+
+    await EcdhService.savePrivateKey(
+        userId, 'default', result['privateKeyBytes']);
+    await EcdhService.savePublicKey(userId, result['publicKeyBytes']);
+
+    await FirebaseFirestore.instance.collection('user_keys').doc(userId).set(
+        {'username': FirebaseAuth.instance.currentUser?.displayName ?? ''},
+        SetOptions(merge: true));
+
+    int retries = 0;
+    const maxRetries = 5;
+    const retryDelay = Duration(milliseconds: 300);
+
+    while (retries < maxRetries) {
+      final checkDoc = await FirebaseFirestore.instance
+          .collection('user_keys')
+          .doc(userId)
+          .get();
+
+      if (checkDoc.exists && checkDoc.data()!.containsKey('publicKey')) {
+        print('[ECDH] Public key verified saved for $userId');
+        return;
+      }
+
+      await Future.delayed(retryDelay);
+      retries++;
+    }
+    throw Exception('[ECDH] Public key not confirmed after retries');
+  }
+
+  // Helper
   static String bytesToString(Uint8List bytes) {
     return base64Encode(bytes);
   }

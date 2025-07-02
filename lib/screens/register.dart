@@ -44,19 +44,17 @@ class _RegisterPageState extends State<RegisterPage> {
       final username = nameController.text.trim();
       final password = passwordController.text.trim();
 
+      await userCredential.user?.updateDisplayName(nameController.text.trim());
+
       // Generate and verify key pair
       final keyGenResult = await EcdhService.generateKeyPair();
       if (!keyGenResult['success']) {
         throw Exception('Failed to generate keys: ${keyGenResult['error']}');
       }
 
-      // Extract private key bytes first
       final privateKeyBytes = keyGenResult['privateKeyBytes'];
       final publicKeyBytes = keyGenResult['publicKeyBytes'];
 
-      // final keyPair = keyGenResult['keyPair'];
-
-      // Save private key securely on device
       final privateKeyResult =
           await EcdhService.savePrivateKey(userId, password, privateKeyBytes);
       if (!privateKeyResult['success']) {
@@ -64,7 +62,6 @@ class _RegisterPageState extends State<RegisterPage> {
             'Failed to save private key: ${privateKeyResult['error']}');
       }
 
-      // Save and verify public key
       final publicKeyResult =
           await EcdhService.savePublicKey(userId, publicKeyBytes);
       if (!publicKeyResult['success']) {
@@ -72,20 +69,13 @@ class _RegisterPageState extends State<RegisterPage> {
             'Failed to save public key: ${publicKeyResult['error']}');
       }
 
-      // Verify private key was saved
       final verifyResult = await EcdhService.verifyPrivateKey(userId);
       if (!verifyResult['exists']) {
         throw Exception(
             'Private key verification failed: ${verifyResult['error']}');
       }
 
-      // Log successful key generation and storage
-      print('Key generation successful:');
-      // print('- Private key length: ${privateKeyResult['keyLength']}');
-      // print('- Private key preview: ${verifyResult['keyPreview']}');
-      // print('- Public key length: ${publicKeyResult['keyLength']}');
-      EncryptionLogger.logKeyGeneration(
-          userId: userId, publicKeyPreview: publicKeyBytes.take(8).join(','));
+      print('Key pair generated successfully');
 
       await FirebaseFirestore.instance.collection('users').doc(userId).set({
         'username': username,
@@ -110,9 +100,6 @@ class _RegisterPageState extends State<RegisterPage> {
           'isOnline': true
         }
       });
-
-      // Update display name
-      await userCredential.user?.updateDisplayName(nameController.text.trim());
 
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Registration Successful!')),

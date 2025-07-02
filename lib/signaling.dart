@@ -1,12 +1,17 @@
 import 'package:socket_io_client/socket_io_client.dart' as IO;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 class SignalingService {
+  static final SignalingService _instance = SignalingService._internal();
+
+  factory SignalingService() => _instance;
+
   late IO.Socket _socket;
-  final String serverUrl;
+  final String _serverUrl = 'http://192.168.1.10:3000';
   bool _isConnected = false;
 
-  SignalingService(this.serverUrl) {
+  SignalingService._internal() {
     connect();
   }
 
@@ -14,7 +19,7 @@ class SignalingService {
     if (_isConnected) return;
 
     _socket = IO.io(
-        serverUrl,
+        _serverUrl,
         IO.OptionBuilder()
             .setTransports(['websocket'])
             .enableReconnection()
@@ -49,12 +54,19 @@ class SignalingService {
       print('Socket not connected, attempting to reconnect...');
       connect();
     }
-    _socket
-        .emit('join_stream', {'streamId': streamId, 'isStreamer': isStreamer});
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    print('[SOCKET] join_stream for $userId');
+
+    _socket.emit('join_stream', {
+      'streamId': streamId,
+      'isStreamer': isStreamer,
+      'userId': userId,
+    });
   }
 
-  void onViewerJoined(Function(String) callback) {
-    _socket.on('viewer_joined', (data) => callback(data['viewerId']));
+  void onViewerJoined(Function(Map<String, dynamic>) callback) {
+    _socket.on(
+        'viewer_joined', (data) => callback(Map<String, dynamic>.from(data)));
   }
 
   void sendOffer(
@@ -87,15 +99,22 @@ class SignalingService {
     });
   }
 
-  void sendIceCandidate(String streamId, RTCIceCandidate candidate) {
+  void sendIceCandidate(String streamId, RTCIceCandidate candidate,
+      {required String targetId}) {
     if (!_isConnected) return;
+
+    print(
+        '[SIGNALING] Sending ICE candidate to $targetId: ${candidate.candidate}');
 
     _socket.emit('ice_candidate', {
       'streamId': streamId,
+      'targetId': targetId,
       'candidate': {
         'candidate': candidate.candidate,
         'sdpMid': candidate.sdpMid,
-        'sdpMLineIndex': candidate.sdpMLineIndex,
+        'sdpMLineIndex': candidate.sdpMLineIndex is int
+            ? candidate.sdpMLineIndex
+            : int.tryParse(candidate.sdpMLineIndex.toString()),
       }
     });
   }
@@ -105,7 +124,13 @@ class SignalingService {
   }
 
   void onAnswer(Function(Map<String, dynamic>) callback) {
-    _socket.on('answer', (data) => callback(data));
+    _socket.on('answer', (data) {
+      final parsedData = Map<String, dynamic>.from(data);
+      if (data is Map && data['socketId'] != null) {
+        parsedData['socketId'] = data['socketId'];
+      }
+      callback(parsedData);
+    });
   }
 
   void onIceCandidate(Function(Map<String, dynamic>) callback) {

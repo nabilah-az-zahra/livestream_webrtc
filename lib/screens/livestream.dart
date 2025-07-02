@@ -1,5 +1,11 @@
 import 'dart:async';
 import 'dart:math';
+import 'dart:ui' as ui;
+import 'package:flutter/rendering.dart';
+import 'package:flutter/foundation.dart';
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'dart:typed_data';
 import 'dart:convert';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -90,10 +96,7 @@ class ConnectionMonitor {
   }
 
   void _setupConnectionMonitoring() {
-    // Monitor connection state changes
     peerConnection.onConnectionState = (RTCPeerConnectionState state) {
-      // print('Connection state changed to: $state');
-
       switch (state) {
         case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
           _wasConnected = true;
@@ -113,14 +116,12 @@ class ConnectionMonitor {
       }
     };
 
-    // Start periodic connection checks
     _monitorTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
       _checkConnection();
     });
   }
 
   void _handleDisconnection() {
-    // print('Connection lost, attempting to recover...');
     onConnectionLost();
 
     if (_reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
@@ -134,8 +135,6 @@ class ConnectionMonitor {
 
   Future<void> _attemptReconnection() async {
     _reconnectAttempts++;
-    // print(
-    //     'Attempting reconnection (${_reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})');
 
     try {
       final offer = await peerConnection.createOffer({
@@ -165,7 +164,6 @@ class ConnectionMonitor {
   Future<void> _checkConnection() async {
     if (peerConnection.connectionState ==
         RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-      // Check data channel state
       final stats = await peerConnection.getStats();
       bool hasActiveDataChannel = false;
 
@@ -176,7 +174,6 @@ class ConnectionMonitor {
       });
 
       if (!hasActiveDataChannel) {
-        // print('Data channel appears to be closed, attempting recovery...');
         _handleDisconnection();
       }
     }
@@ -191,17 +188,24 @@ class ConnectionMonitor {
 class _LiveStreamPageState extends State<LiveStreamPage> {
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
-  final _signalingService = SignalingService('http://localhost:3000');
+  final _signalingService = SignalingService();
   final Map<String, RTCPeerConnection> _peerConnections = {};
   final Map<String, bool> _connectionStates = {};
   final List<RTCIceCandidate> _pendingCandidates = [];
+  final Map<String, RTCDataChannel> _viewerDataChannels = {};
+  final GlobalKey _captureKey = GlobalKey();
+  final GlobalKey _previewContainerKey = GlobalKey();
+  final Map<String, Uint8List?> _cachedKeys = {};
 
   RTCPeerConnection? _peerConnection;
   RTCDataChannel? _encryptedVideoChannel;
+  Timer? _frameTimer;
   Timer? _keyRotationTimer;
+  Timer? _keyRefreshTimer;
   MediaStream? _localStream;
   MediaStream? _remoteStream;
   ConnectionMonitor? _connectionMonitor;
+  Uint8List? _currentFrame;
 
   bool _isLoading = true;
   bool _hasError = false;
@@ -209,6 +213,8 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
   bool _isDisposed = false;
   bool _remoteDescriptionSet = false;
   bool _isEncryptionReady = false;
+  bool _isFrameSendingActive = false;
+  bool _isCapturing = false;
 
   StreamSubscription? _streamStatusSubscription;
   StreamSubscription? _chatSubscription;
@@ -224,7 +230,34 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
   void initState() {
     super.initState();
     if (FirebaseAuth.instance.currentUser != null) {
-      _initializeStream();
+      _initializeStream().then((_) {
+        if (widget.isStreamer) {
+          _startEncryptedFrameSender();
+
+          Timer(const Duration(seconds: 1), () {
+            print(
+                '[STREAMER] 1-second check - Frame sending active: $_isFrameSendingActive');
+            print(
+                '[STREAMER] Connected viewers: ${_viewerDataChannels.length}');
+          });
+
+          Timer(const Duration(seconds: 3), () {
+            _isFrameSendingActive = true;
+            print('[STREAMER] Frame sending activated after 3 seconds');
+            print('[STREAMER] Data channels status:');
+            _viewerDataChannels.forEach((viewerId, dc) {
+              print('  - $viewerId: ${dc.state}');
+            });
+          });
+
+          Timer(const Duration(seconds: 5), () {
+            if (!_isFrameSendingActive) {
+              _isFrameSendingActive = true;
+              print('[STREAMER] Frame sending force-activated after 5 seconds');
+            }
+          });
+        }
+      });
       _listenToStreamStatus();
       _initializeChat();
       _setupKeyRotation();
@@ -254,38 +287,96 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     }
   }
 
-  Future<void> _setupEncryptedDataChannel(RTCPeerConnection pc) async {
-    final dataChannelInit = RTCDataChannelInit()
-      ..ordered = true
-      ..protocol = 'video-e2ee';
-
-    _encryptedVideoChannel =
-        await pc.createDataChannel('video-e2ee', dataChannelInit);
-
-    if (widget.isStreamer) {
-      await StreamCryptoService.encryptRtpSender(
-        _encryptedVideoChannel!,
-        widget.streamId,
-        FirebaseAuth.instance.currentUser!.uid,
-        widget.streamerId,
-        true,
+  Future<void> tryKeyExchangeWithViewer({
+    required String streamerId,
+    required String viewerId,
+    required String streamId,
+    int retries = 5,
+    Duration delay = const Duration(seconds: 1),
+  }) async {
+    for (int attempt = 0; attempt < retries; attempt++) {
+      final result = await StreamKeyExchangeService.generateSharedSecret(
+        streamerId,
+        viewerId,
+        true, // isStreamer
+        streamId: streamId,
       );
+
+      if (result['success'] == true) {
+        print('[KEY_EXCHANGE] Shared secret established for viewer: $viewerId');
+        return;
+      }
+
+      final error = result['error']?.toString() ?? '';
+      print(
+          'Attempt $attempt: Failed to generate shared key for viewer $viewerId: $error');
+
+      if (error.contains('public key not found')) {
+        await Future.delayed(delay);
+      } else {
+        // Non-retryable error
+        break;
+      }
+    }
+
+    print(
+        '[KEY_EXCHANGE][ERROR] Could not establish shared key for viewer $viewerId after retries');
+  }
+
+  Future<void> _setupEncryptedDataChannel(
+      RTCPeerConnection pc, String viewerId, String socketId) async {
+    if (widget.isStreamer && viewerId != null) {
+      // Streamer creating data channel for specific viewer
+      final dataChannelInit = RTCDataChannelInit()
+        ..ordered = true
+        ..protocol = 'video-e2ee'
+        ..negotiated = false;
+
+      try {
+        final dataChannel =
+            await pc.createDataChannel('video-e2ee', dataChannelInit);
+
+        print('[STREAMER] Created data channel: ${dataChannel.label}');
+        print(
+            '[STREAMER] Data channel init params: ordered=${dataChannelInit.ordered}, protocol=${dataChannelInit.protocol}');
+
+        dataChannel.onDataChannelState = (state) {
+          print('[STREAMER] Data channel for $viewerId state: $state');
+          if (state == RTCDataChannelState.RTCDataChannelOpen) {
+            _viewerDataChannels[viewerId] = dataChannel;
+            print('[STREAMER] Viewer $viewerId data channel is open');
+          } else if (state == RTCDataChannelState.RTCDataChannelClosed ||
+              state == RTCDataChannelState.RTCDataChannelClosing) {
+            _viewerDataChannels.remove(viewerId);
+            print('[STREAMER] Viewer $viewerId data channel closed');
+          }
+        };
+
+        if (_localStream != null) {
+          for (final track in _localStream!.getTracks()) {
+            await pc.addTrack(track, _localStream!);
+          }
+        }
+
+        final offer = await pc.createOffer({
+          'offerToReceiveAudio': true,
+          'offerToReceiveVideo': true,
+          'iceRestart': true,
+        });
+
+        print('[SIGNALING] Offer sent to $socketId for viewerId: $viewerId');
+
+        await pc.setLocalDescription(offer);
+        await _waitForIceGathering(pc);
+
+        print('[STREAMER] Sending offer to viewer: $viewerId');
+        _signalingService.sendOffer(widget.streamId, socketId, offer);
+      } catch (e) {
+        print('[ERROR] Exception creating DataChannel for $viewerId: $e');
+      }
+      // _viewerDataChannels[viewerId] = dataChannel;
     } else {
-      final viewerId = FirebaseAuth.instance.currentUser?.uid ?? 'unknown';
-      final streamerId = widget.streamerId;
-
-      await StreamCryptoService.decryptRtpReceiver(
-        _encryptedVideoChannel!,
-        widget.streamId,
-        FirebaseAuth.instance.currentUser!.uid,
-        widget.streamerId,
-        false,
-      );
-
-      EncryptionLogger.logEndToEndFlow(
-        streamerId: streamerId,
-        viewerId: viewerId,
-      );
+      print('[VIEWER] Data channel setup handled via onDataChannel callback');
     }
   }
 
@@ -348,6 +439,210 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     }
   }
 
+  Future<bool> _isRepaintBoundaryReady() async {
+    try {
+      await Future.delayed(Duration(milliseconds: 500));
+      final boundary = _previewContainerKey.currentContext?.findRenderObject()
+          as RenderRepaintBoundary?;
+      if (boundary == null) return false;
+
+      // Try to capture a test image
+      final image = await boundary.toImage(pixelRatio: 1.0);
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      return byteData != null;
+    } catch (e) {
+      print('[STREAMER] RepaintBoundary not ready: $e');
+      return false;
+    }
+  }
+
+  void _startEncryptedFrameSender() {
+    _keyRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _cachedKeys.clear();
+    });
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      Timer.periodic(const Duration(milliseconds: 100), (checkTimer) async {
+        if (await _isRepaintBoundaryReady()) {
+          checkTimer.cancel();
+          print('[STREAMER] RepaintBoundary is ready, starting frame timer');
+
+          _frameTimer =
+              Timer.periodic(const Duration(milliseconds: 500), (_) async {
+            try {
+              if (!_isFrameSendingActive) {
+                print('[STREAMER] Frame sending not active, skipping frame');
+                return;
+              }
+
+              final List<String> connectedViewers = [];
+
+              _viewerDataChannels.forEach((viewerId, dataChannel) {
+                final state = dataChannel.state;
+                print('[STREAMER] Viewer $viewerId data channel state: $state');
+                if (state == RTCDataChannelState.RTCDataChannelOpen) {
+                  connectedViewers.add(viewerId);
+                }
+              });
+
+              if (connectedViewers.isEmpty) {
+                print('[STREAMER] No connected viewers found, skipping frame');
+                return;
+              }
+
+              print('[STREAMER] Connected viewers: ${connectedViewers.length}');
+
+              final boundary = _previewContainerKey.currentContext
+                  ?.findRenderObject() as RenderRepaintBoundary?;
+              if (boundary == null) {
+                print('[STREAMER] Boundary is null, skipping frame');
+                return;
+              }
+
+              final image = await boundary.toImage(pixelRatio: 1.0);
+              final byteData =
+                  await image.toByteData(format: ui.ImageByteFormat.png);
+              if (byteData == null || byteData.lengthInBytes == 0) {
+                print('[DEBUG] Captured image is empty or null');
+              }
+
+              final bytes = byteData?.buffer.asUint8List();
+              if (bytes == null) {
+                print('[STREAMER] Failed to get image bytes, skipping frame');
+                return;
+              }
+
+              print('[STREAMER] Captured frame: ${bytes.length} bytes');
+
+              if (!kIsWeb && Platform.isAndroid) {
+                try {
+                  final dir = await getApplicationDocumentsDirectory();
+                  final file = File(
+                      '${dir.path}/debug_frame_${DateTime.now().millisecondsSinceEpoch}.png');
+                  await file.writeAsBytes(bytes);
+                  print(
+                      '[DEBUG] Streamer saved captured frame to: ${file.path}');
+                } catch (e) {
+                  print('[DEBUG] Could not save frame to file: $e');
+                }
+              }
+
+              for (final viewerId in connectedViewers) {
+                await _sendEncryptedFrame(viewerId, bytes);
+              }
+            } catch (e) {
+              print('[STREAMER] Frame encryption/send error: $e');
+            }
+          });
+        } else {
+          print('[STREAMER] Waiting for RepaintBoundary to be ready...');
+        }
+      });
+    });
+  }
+
+  Future<void> _preloadKeyForViewer(String viewerId) async {
+    try {
+      final aesKey = await StreamKeyExchangeService.getStreamKey(
+        widget.streamId,
+        otherUserId: viewerId,
+      );
+      if (aesKey != null) {
+        _cachedKeys[viewerId] = aesKey;
+        print('[STREAMER] Key cached for viewer: $viewerId');
+      }
+    } catch (e) {
+      print('[STREAMER] Failed to preload key for $viewerId: $e');
+    }
+  }
+
+  Future<void> _dumpEncrypted(Uint8List encrypted) async {
+    if (await Permission.storage.request().isDenied) return;
+
+    final dir = await getDownloadsDirectory();
+    final filePath =
+        '${dir!.path}/cipher_${DateTime.now().millisecondsSinceEpoch}.bin';
+    await File(filePath).writeAsBytes(encrypted, flush: true);
+    print('[E2EE] Cipher dump → $filePath');
+  }
+
+  Future<void> _sendEncryptedFrame(String viewerId, Uint8List bytes) async {
+    try {
+      Uint8List? aesKey = _cachedKeys[viewerId];
+      if (aesKey == null) {
+        aesKey = await StreamKeyExchangeService.getStreamKey(
+          widget.streamId,
+          otherUserId: viewerId,
+        );
+        if (aesKey == null) {
+          print('[STREAMER] No AES key available for viewer: $viewerId');
+          return;
+        }
+        _cachedKeys[viewerId] = aesKey;
+      }
+
+      final nonce = StreamCryptoService.generateNonce();
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final aad = StreamCryptoService.buildAad(widget.streamId, timestamp);
+      final cipher =
+          StreamCryptoService.createAesGcmCipher(true, aesKey, nonce, aad: aad);
+
+      final sw = Stopwatch()..start();
+      final encrypted = cipher.process(bytes);
+      sw.stop();
+      final encMs = sw.elapsedMicroseconds / 1000.0;
+
+      _dumpEncrypted(encrypted);
+
+      EncryptionLogger.logCryptoTiming(
+        streamId: widget.streamId,
+        operation: 'encrypt',
+        frameSize: bytes.length,
+        durationMs: encMs,
+        success: true,
+      );
+
+      final payload =
+          Uint8List(StreamCryptoService.nonceLength + encrypted.length + 4);
+      payload.setRange(0, StreamCryptoService.nonceLength, nonce);
+      payload.setRange(StreamCryptoService.nonceLength,
+          StreamCryptoService.nonceLength + encrypted.length, encrypted);
+      payload.buffer.asByteData().setUint32(
+          StreamCryptoService.nonceLength + encrypted.length, timestamp);
+
+      final encoded = base64.encode(payload);
+      print('[STREAMER] Frame details for $viewerId:');
+      print('  - Original bytes: ${bytes.length}');
+      print('  - Encrypted bytes: ${encrypted.length}');
+      print('  - Payload bytes: ${payload.length}');
+      print('  - Encoded length: ${encoded.length}');
+      print('  - Data channel state: ${_viewerDataChannels[viewerId]?.state}');
+
+      final dc = _viewerDataChannels[viewerId];
+      if (dc != null && dc.state == RTCDataChannelState.RTCDataChannelOpen) {
+        try {
+          dc.send(RTCDataChannelMessage(encoded));
+          print('[STREAMER] Frame sent successfully to viewer: $viewerId');
+        } catch (sendError) {
+          print('[STREAMER] Error sending frame to $viewerId: $sendError');
+        }
+      } else {
+        print(
+            '[STREAMER] Data channel not ready for $viewerId. State: ${dc?.state}');
+      }
+    } catch (e) {
+      EncryptionLogger.logCryptoTiming(
+        streamId: widget.streamId,
+        operation: 'encrypt',
+        frameSize: bytes.length,
+        durationMs: 0,
+        success: false,
+        error: e.toString(),
+      );
+      print('[STREAMER] Error sending frame to $viewerId: $e');
+    }
+  }
+
   Future<void> _initializeStreamer() async {
     await _localRenderer.initialize();
 
@@ -361,31 +656,32 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     });
 
     _localRenderer.srcObject = _localStream;
+    print(
+        '[STREAMER] Local stream tracks: ${_localStream?.getTracks().map((t) => t.kind)}');
 
-    // Verify encryption is ready before setting up connection
-    final encryptionVerified =
-        await StreamCryptoService.verifyEncryption(widget.streamId);
+    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+    if (currentUserId == null) throw Exception('Not logged in');
+
+    final encryptionVerified = await StreamCryptoService.verifyEncryption(
+      widget.streamId,
+      currentUserId,
+    );
     if (!encryptionVerified) {
       throw Exception('Failed to verify stream encryption');
     }
-
-    setState(() {
-      _isEncryptionReady = true;
-    });
 
     await _setupStreamerConnection();
   }
 
   Future<void> _initializeViewer() async {
-    final encryptionVerified =
-        await StreamCryptoService.verifyEncryption(widget.streamId);
+    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+    if (currentUserId == null) throw Exception('Not logged in');
+
+    final encryptionVerified = await StreamCryptoService.verifyEncryption(
+        widget.streamId, widget.streamerId);
     if (!encryptionVerified) {
       throw Exception('Failed to verify stream encryption');
     }
-
-    setState(() {
-      _isEncryptionReady = true;
-    });
 
     await _setupViewerConnection();
   }
@@ -399,6 +695,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       'iceServers': [
         {
           'urls': [
+            'stun:stun.l.google.com:19302',
             'stun:stun1.l.google.com:19302',
             'stun:stun2.l.google.com:19302',
             'stun:stun3.l.google.com:19302',
@@ -422,11 +719,14 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
   Future<RTCPeerConnection?> _initPeerConnection(String viewerId) async {
     if (_isDisposed) return null;
 
+    print('Creating new peer connection for viewer: $viewerId');
+
     try {
       final configuration = {
         'iceServers': [
           {
             'urls': [
+              'stun:stun.l.google.com:19302',
               'stun:stun1.l.google.com:19302',
               'stun:stun2.l.google.com:19302',
               'stun:stun3.l.google.com:19302',
@@ -439,6 +739,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         'bundlePolicy': 'max-bundle',
         'rtcpMuxPolicy': 'require',
       };
+
       final peerConnection = await createPeerConnection(configuration);
       if (peerConnection == null) return null;
 
@@ -453,19 +754,23 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         }
       };
 
-      peerConnection.onIceGatheringState = (RTCIceGatheringState state) {
-        // print('ICE gathering state for $viewerId: $state');
+      peerConnection.onSignalingState = (RTCSignalingState state) {
+        print('[SIGNALING] Signaling state for $viewerId: $state');
       };
 
-      peerConnection.onSignalingState = (RTCSignalingState state) {
-        // print('Signaling state for $viewerId: $state');
+      peerConnection.onIceConnectionState = (RTCIceConnectionState state) {
+        print('[ICE] ICE connection state for $viewerId: $state');
       };
 
       peerConnection.onIceCandidate = (RTCIceCandidate? candidate) {
         if (candidate != null &&
             !_isDisposed &&
             _connectionStates[viewerId] == true) {
-          _signalingService.sendIceCandidate(widget.streamId, candidate);
+          _signalingService.sendIceCandidate(
+            widget.streamId,
+            candidate,
+            targetId: viewerId,
+          );
         }
       };
 
@@ -481,48 +786,55 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       _signalingService.connect();
       _signalingService.joinStream(widget.streamId, true);
 
-      _signalingService.onViewerJoined((viewerId) async {
-        // print('Setting up connection for viewer: $viewerId');
+      _signalingService.onViewerJoined((data) async {
+        final firebaseUserId = data['firebaseUserId'];
+        final socketId = data['socketId'];
 
-        final peerConnection = await _initPeerConnection(viewerId);
-        if (peerConnection == null) return;
+        final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+        if (currentUserId == null || firebaseUserId == null) return;
+        print('Setting up connection for viewer: $firebaseUserId');
 
-        _peerConnections[viewerId] = peerConnection;
-        _connectionStates[viewerId] = true;
+        final result = await StreamKeyExchangeService.generateSharedSecret(
+          currentUserId,
+          firebaseUserId,
+          true,
+          streamId: widget.streamId,
+        );
 
-        await _setupEncryptedDataChannel(peerConnection);
-        await Future.delayed(const Duration(milliseconds: 1000));
-
-        if (_localStream != null) {
-          // print('Adding local stream tracks');
-          for (final track in _localStream!.getTracks()) {
-            await peerConnection.addTrack(track, _localStream!);
-          }
+        if (!result['success']) {
+          print(
+              'Failed to generate shared key for viewer $firebaseUserId: ${result['error']}');
+          return;
         }
 
-        try {
-          final offer = await peerConnection.createOffer({
-            'offerToReceiveAudio': true,
-            'offerToReceiveVideo': true,
-            'iceRestart': true
-          });
+        await Future.delayed(const Duration(milliseconds: 500));
 
-          // print('Created offer, setting local description');
-          await peerConnection.setLocalDescription(offer);
-
-          await _waitForIceGathering(peerConnection);
-
-          // print('Sending offer to viewer: $viewerId');
-          _signalingService.sendOffer(widget.streamId, viewerId, offer);
-        } catch (e) {
-          print('Error in connection setup: $e');
-          await _cleanupPeerConnection(viewerId);
+        if (_peerConnections.containsKey(firebaseUserId)) {
+          print(
+              '[WARN] Peer connection for $firebaseUserId already exists. Skipping.');
+          return;
         }
+
+        final peerConnection = await _initPeerConnection(firebaseUserId);
+        if (peerConnection == null) {
+          print(
+              '[ERROR] Failed to initialize peer connection for $firebaseUserId');
+          return;
+        }
+
+        print('Creating new peer connection for viewer: $firebaseUserId');
+        _peerConnections[firebaseUserId] = peerConnection;
+        _connectionStates[firebaseUserId] = true;
+
+        await _setupEncryptedDataChannel(
+            peerConnection, firebaseUserId, socketId);
       });
 
       _signalingService.onAnswer((data) async {
         final viewerId = data['viewerId'];
-        // print('Received answer from viewer: $viewerId');
+        final socketId = data['socketId'];
+        print(
+            '[SIGNALING] Received answer from viewerId: $viewerId, socketId: $socketId');
 
         if (_isDisposed || _connectionStates[viewerId] != true) return;
 
@@ -532,12 +844,20 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         try {
           if (peerConnection.signalingState !=
               RTCSignalingState.RTCSignalingStateClosed) {
+            print('[SIGNALING] Received answer from viewerId: $viewerId');
+            print(
+                '[SIGNALING] Current keys in _peerConnections: ${_peerConnections.keys}');
+
             final answer = RTCSessionDescription(
               data['answer']['sdp'],
               data['answer']['type'],
             );
             await peerConnection.setRemoteDescription(answer);
-            // print('Remote description set for viewer: $viewerId');
+            print('[SIGNALING] Remote description set for viewerId: $viewerId');
+            print(
+                '[SIGNALING] Current ICE connection state: ${peerConnection.iceConnectionState}');
+            print(
+                '[SIGNALING] Current signaling state: ${peerConnection.signalingState}');
           }
         } catch (e) {
           print('Error handling answer from $viewerId: $e');
@@ -562,7 +882,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
               int.parse(candidateData['sdpMLineIndex']?.toString() ?? '0'),
             );
             await peerConnection.addCandidate(candidate);
-            // print('ICE candidate added for viewer: $viewerId');
           }
         } catch (e) {
           print('Error handling ICE candidate for $viewerId: $e');
@@ -574,85 +893,94 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     }
   }
 
-  Future<void> _waitForIceGathering(RTCPeerConnection peerConnection) {
+  Future<void> _waitForIceGathering(RTCPeerConnection peerConnection) async {
     final completer = Completer<void>();
 
     if (peerConnection.iceGatheringState ==
         RTCIceGatheringState.RTCIceGatheringStateComplete) {
+      print('[ICE] Gathering already complete');
       completer.complete();
     } else {
-      peerConnection.onIceGatheringState = (RTCIceGatheringState state) {
+      peerConnection.onIceGatheringState = (state) {
+        print('[ICE] Gathering state changed to: $state');
         if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
-          completer.complete();
+          peerConnection.onIceGatheringState = null;
+          if (!completer.isCompleted) completer.complete();
         }
       };
+      Future.delayed(const Duration(seconds: 10), () {
+        if (!completer.isCompleted) {
+          print('[ICE] Gathering timeout — continuing anyway');
+          peerConnection.onIceGatheringState = null;
+          completer.complete();
+        }
+      });
     }
-
-    return completer.future.timeout(const Duration(seconds: 5),
-        onTimeout: () => print('ICE gathering timed out'));
+    return completer.future;
   }
 
   Future<void> _setupViewerConnection() async {
     try {
+      String? _streamerSocketId;
+
       _peerConnection = await _createPeerConnection();
-      // Add connection monitor
-      _connectionMonitor = ConnectionMonitor(
-        peerConnection: _peerConnection!,
-        streamId: widget.streamId,
-        onConnectionLost: () {
-          setState(() {
-            _remoteVideoConnected = false;
-          });
-        },
-        onConnectionRestored: () {
-          setState(() {
-            _remoteVideoConnected = true;
-          });
-        },
-      );
-      await _setupEncryptedDataChannel(_peerConnection!);
-
-      // print('Setting up viewer connection');
-
-      _peerConnection?.onIceCandidate = (candidate) {
-        if (candidate != null) {
-          // print('Viewer sending ICE candidate: ${candidate.candidate}');
-          _signalingService.sendIceCandidate(widget.streamId, candidate);
-        }
-      };
-
-      _peerConnection?.onTrack = (RTCTrackEvent event) {
-        // print('Received track: ${event.track.kind}');
-        if (event.streams.isNotEmpty) {
-          setState(() {
-            _remoteStream = event.streams[0];
-            _remoteRenderer.srcObject = _remoteStream;
-            if (event.track.kind == 'video') {
-              _remoteVideoConnected = true;
-            }
-          });
-        }
-      };
 
       _signalingService.connect();
       _signalingService.joinStream(widget.streamId, false);
 
       _signalingService.onOffer((data) async {
-        // print('Received offer from streamer');
         if (data['type'] != null && data['sdp'] != null) {
           try {
+            _streamerSocketId = data['streamerId'];
+            if (_streamerSocketId == null) {
+              print('[ERROR] streamerId missing in offer data');
+              return;
+            }
+
+            print('[VIEWER] Binding onDataChannel callback...');
+
+            _peerConnection?.onDataChannel = (RTCDataChannel channel) {
+              print('[VIEWER] Data channel received: ${channel.label}');
+              if (channel.label == 'video-e2ee') {
+                _encryptedVideoChannel = channel;
+
+                _encryptedVideoChannel?.onDataChannelState = (state) {
+                  print('[VIEWER] Data channel state changed to: $state');
+                  if (state == RTCDataChannelState.RTCDataChannelOpen) {
+                    print(
+                        '[VIEWER] Data channel is open and ready to receive frames');
+                    setState(() {
+                      _isEncryptionReady = true;
+                      print(
+                          '[VIEWER] _isEncryptionReady = $_isEncryptionReady');
+                    });
+                    _preloadViewerKey();
+                  }
+                };
+
+                _encryptedVideoChannel?.onMessage =
+                    (RTCDataChannelMessage message) {
+                  print(
+                      '[VIEWER] Received encrypted frame data: ${message.text.length} characters');
+                  _handleEncryptedFrame(message.text);
+                };
+              }
+            };
+
             final offer = RTCSessionDescription(data['sdp'], data['type']);
+            print('[VIEWER] Setting remote description...');
             await _peerConnection?.setRemoteDescription(offer);
+            print('[VIEWER] Remote description set!');
             _remoteDescriptionSet = true;
 
             if (_pendingCandidates.isNotEmpty) {
-              // print('Adding ${_pendingCandidates.length} pending candidates');
               for (var candidate in _pendingCandidates) {
                 await _peerConnection?.addCandidate(candidate);
               }
               _pendingCandidates.clear();
             }
 
+            print('[VIEWER] Received offer. Creating and sending answer...');
             final answer = await _peerConnection?.createAnswer({
               'offerToReceiveAudio': true,
               'offerToReceiveVideo': true,
@@ -671,7 +999,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       _signalingService.onIceCandidate((data) async {
         try {
           if (data['candidate'] != null) {
-            // print('Received ICE candidate from streamer');
             final candidateData = data['candidate'];
             final candidate = RTCIceCandidate(
               candidateData['candidate'],
@@ -682,7 +1009,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
             if (_remoteDescriptionSet) {
               await _peerConnection?.addCandidate(candidate);
             } else {
-              // print('Storing ICE candidate for later');
               _pendingCandidates.add(candidate);
             }
           }
@@ -690,9 +1016,169 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
           print('Error handling ICE candidate: $e');
         }
       });
+
+      _peerConnection?.onIceCandidate = (candidate) {
+        if (candidate != null && _streamerSocketId != null) {
+          print('Viewer sending ICE candidate: ${candidate.candidate}');
+          _signalingService.sendIceCandidate(
+            widget.streamId,
+            candidate,
+            targetId: _streamerSocketId!,
+          );
+        }
+      };
+
+      _peerConnection?.onTrack = (RTCTrackEvent event) {
+        if (event.streams.isNotEmpty) {
+          setState(() {
+            _remoteStream = event.streams[0];
+            _remoteRenderer.srcObject = _remoteStream;
+            if (event.track.kind == 'video') {
+              _remoteVideoConnected = true;
+            }
+          });
+        }
+      };
+
+      _connectionMonitor = ConnectionMonitor(
+        peerConnection: _peerConnection!,
+        streamId: widget.streamId,
+        onConnectionLost: () {
+          setState(() {
+            _remoteVideoConnected = false;
+          });
+        },
+        onConnectionRestored: () {
+          setState(() {
+            _remoteVideoConnected = true;
+          });
+        },
+      );
     } catch (e) {
       print('Error in setupViewerConnection: $e');
       rethrow;
+    }
+  }
+
+  Future<void> _handleEncryptedFrame(String encodedFrame) async {
+    try {
+      if (encodedFrame.isEmpty) {
+        print('[VIEWER] Received empty frame data');
+        return;
+      }
+
+      final payload = base64.decode(encodedFrame);
+      if (payload.length < StreamCryptoService.nonceLength + 4) {
+        print('[VIEWER] Payload too short: ${payload.length}');
+        return;
+      }
+
+      final nonce = payload.sublist(0, StreamCryptoService.nonceLength);
+      final timestamp =
+          payload.buffer.asByteData().getUint32(payload.length - 4);
+      final encrypted =
+          payload.sublist(StreamCryptoService.nonceLength, payload.length - 4);
+
+      print(
+          '[VIEWER] Processing frame - nonce: ${nonce.length}, encrypted: ${encrypted.length}, timestamp: $timestamp');
+
+      Uint8List? aesKey = _cachedKeys[widget.streamerId];
+      if (aesKey == null) {
+        aesKey = await StreamKeyExchangeService.getStreamKey(widget.streamId,
+            otherUserId: widget.streamerId);
+        if (aesKey == null) {
+          print('[VIEWER] No AES key available');
+          return;
+        }
+        _cachedKeys[widget.streamerId] = aesKey;
+        print('[VIEWER] AES key retrieved and cached');
+      }
+
+      final aad = StreamCryptoService.buildAad(widget.streamId, timestamp);
+      final cipher = StreamCryptoService.createAesGcmCipher(
+          false, aesKey, nonce,
+          aad: aad);
+
+      final sw = Stopwatch()..start();
+      final decrypted = cipher.process(encrypted);
+      sw.stop();
+      final decMs = sw.elapsedMicroseconds / 1000.0;
+
+      EncryptionLogger.logCryptoTiming(
+        streamId: widget.streamId,
+        operation: 'decrypt',
+        frameSize: decrypted.length,
+        durationMs: decMs,
+        success: true,
+      );
+
+      print('[VIEWER] Frame decrypted successfully: ${decrypted.length} bytes');
+
+      try {
+        ui.decodeImageFromList(decrypted, (image) async {
+          final recorder = ui.PictureRecorder();
+          final canvas = Canvas(recorder);
+          canvas.drawImage(image, Offset.zero, Paint());
+
+          final picture = recorder.endRecording();
+          final img = await picture.toImage(image.width, image.height);
+          final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+
+          if (byteData != null && mounted) {
+            setState(() {
+              _currentFrame = byteData.buffer.asUint8List();
+              _remoteVideoConnected = true;
+            });
+            print('[VIEWER] Canvas-drawn frame rendered');
+          }
+        });
+      } catch (e) {
+        print('[DEBUG] PNG decode failed: $e');
+      }
+    } catch (e) {
+      EncryptionLogger.logCryptoTiming(
+        streamId: widget.streamId,
+        operation: 'decrypt',
+        frameSize: 0,
+        durationMs: 0,
+        success: false,
+        error: e.toString(),
+      );
+      print('[VIEWER] Frame decryption error: $e');
+      print('[VIEWER] Stack trace: ${StackTrace.current}');
+    }
+  }
+
+  Future<void> _copyToDownloads(File file) async {
+    final hasPermission = await Permission.storage.request();
+    if (!hasPermission.isGranted) {
+      print('[VIEWER] Storage permission denied');
+      return;
+    }
+
+    final downloadsDir = Directory('/storage/emulated/0/Download/code');
+    if (!await downloadsDir.exists()) {
+      print('[VIEWER] Downloads directory does not exist');
+      return;
+    }
+
+    final newFile =
+        await file.copy('${downloadsDir.path}/${file.uri.pathSegments.last}');
+    print('[VIEWER] Frame copied to: ${newFile.path}');
+  }
+
+  Future<void> _preloadViewerKey() async {
+    try {
+      final aesKey = await StreamKeyExchangeService.getStreamKey(
+        widget.streamId,
+        otherUserId: widget.streamerId,
+      );
+      if (aesKey != null) {
+        _cachedKeys[widget.streamerId] = aesKey;
+        print('[VIEWER] Key cached for streamer: ${widget.streamerId}');
+      }
+    } catch (e) {
+      print('[VIEWER] Failed to preload key: $e');
     }
   }
 
@@ -801,6 +1287,9 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
   @override
   void dispose() {
     _keyRotationTimer?.cancel();
+    _keyRefreshTimer?.cancel();
+    _isFrameSendingActive = false;
+    _cachedKeys.clear();
     _encryptedVideoChannel?.close();
     if (widget.isStreamer) {
       _endStream();
@@ -810,6 +1299,10 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     for (final viewerId in _peerConnections.keys.toList()) {
       _cleanupPeerConnection(viewerId);
     }
+    _frameTimer?.cancel();
+    _viewerDataChannels.forEach((_, dc) => dc.close());
+    _viewerDataChannels.clear();
+
     _signalingService.disconnect();
     _pendingCandidates.clear();
     _streamStatusSubscription?.cancel();
@@ -946,7 +1439,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       );
     }
 
-    final screenSize = MediaQuery.of(context).size;
+    // final screenSize = MediaQuery.of(context).size;
     // final videoHeight = screenSize.height * 0.4;
 
     return Scaffold(
@@ -974,18 +1467,60 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
                 child: Container(
                   color: Colors.black,
                   child: widget.isStreamer
-                      ? RTCVideoView(
-                          _localRenderer,
-                          objectFit:
-                              RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                          mirror: true,
+                      ? RepaintBoundary(
+                          key: _previewContainerKey,
+                          child: RTCVideoView(
+                            _localRenderer,
+                            objectFit: RTCVideoViewObjectFit
+                                .RTCVideoViewObjectFitCover,
+                            mirror: true,
+                          ),
                         )
-                      : RTCVideoView(
-                          _remoteRenderer,
-                          objectFit:
-                              RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                          mirror: false,
-                        ),
+                      : _currentFrame != null
+                          ? Container(
+                              decoration: BoxDecoration(
+                                  border: Border.all(color: Colors.red)),
+                              child: Image.memory(
+                                _currentFrame!,
+                                fit: BoxFit.contain,
+                                gaplessPlayback: true,
+                                key: ValueKey(
+                                    DateTime.now().millisecondsSinceEpoch),
+                                frameBuilder: (context, child, frame, wasSync) {
+                                  if (frame == null) {
+                                    return const Center(
+                                      child: CircularProgressIndicator(
+                                          color: Colors.white),
+                                    );
+                                  }
+                                  return child;
+                                },
+                                errorBuilder: (context, error, stackTrace) {
+                                  return const Center(
+                                    child: Text(
+                                      'Failed to render frame',
+                                      style: TextStyle(color: Colors.red),
+                                    ),
+                                  );
+                                },
+                              ),
+                            )
+                          : Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const CircularProgressIndicator(
+                                      color: Colors.white),
+                                  const SizedBox(height: 16),
+                                  Text(
+                                    _isEncryptionReady
+                                        ? 'Waiting for encrypted frames...'
+                                        : 'Establishing secure connection...',
+                                    style: const TextStyle(color: Colors.white),
+                                  ),
+                                ],
+                              ),
+                            ),
                 ),
               ),
               SafeArea(
@@ -1024,10 +1559,10 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
               ),
             ],
           ),
-          if (!widget.isStreamer && !_remoteVideoConnected)
-            const Center(
-              child: CircularProgressIndicator(color: Colors.white),
-            ),
+          // if (!widget.isStreamer && !_remoteVideoConnected)
+          //   const Center(
+          //     child: CircularProgressIndicator(color: Colors.white),
+          //   ),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             color: const Color(0xFFE5E5E5),

@@ -1,3 +1,5 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
 class EncryptionLogger {
   static void logKeyGeneration(
       {required String userId, required String publicKeyPreview}) {
@@ -37,6 +39,25 @@ class EncryptionLogger {
     final status = success ? 'Success' : 'Failed';
     print(
         '[DECRYPT] Stream: $streamId | Status: $status | Time: ${durationMs}ms');
+  }
+
+  static Future<void> logCryptoTiming({
+    required String streamId,
+    required String operation,
+    required int frameSize,
+    required double durationMs,
+    required bool success,
+    String? error,
+  }) async {
+    await FirebaseFirestore.instance.collection('e2eetime_logs').add({
+      'streamId': streamId,
+      'operation': operation,
+      'frameSize': frameSize,
+      'durationMs': durationMs,
+      'success': success,
+      'error': error,
+      'timestamp': FieldValue.serverTimestamp(),
+    });
   }
 
   static void logEndToEndFlow(

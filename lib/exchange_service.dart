@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:livestream_webrtc/ecdh_service.dart';
 import 'package:livestream_webrtc/logger.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 class StreamKeyExchangeService {
   static final algorithm = X25519();
@@ -14,7 +15,6 @@ class StreamKeyExchangeService {
   static final _keyExchangeLogsRef =
       FirebaseFirestore.instance.collection('key_exchange_logs');
 
-  // Generate shared secret
   static Future<Map<String, dynamic>> generateSharedSecret(
     String userId,
     String otherUserId,
@@ -33,7 +33,8 @@ class StreamKeyExchangeService {
 
     String exchangeId =
         '${userId}_${otherUserId}_${DateTime.now().millisecondsSinceEpoch}';
-    print('Generating shared secret with exchangeId: $exchangeId');
+    print(
+        '[KEY_EXCHANGE] Generating shared secret with exchangeId: $exchangeId');
 
     try {
       final startTime = DateTime.now();
@@ -75,7 +76,8 @@ class StreamKeyExchangeService {
         return {'success': false, 'error': 'Other user public key not found'};
       }
 
-      print('Retrieved public key for $otherUserId successfully.');
+      print(
+          '[KEY_EXCHANGE] Retrieved public key for $otherUserId successfully.');
 
       // Convert keys
       final publicKeyBytes =
@@ -93,29 +95,28 @@ class StreamKeyExchangeService {
       final publicKey =
           SimplePublicKey(publicKeyBytes, type: KeyPairType.x25519);
 
-      // Generate shared secret
       final sharedSecret = await algorithm.sharedSecretKey(
         keyPair: privateKey,
         remotePublicKey: publicKey,
       );
 
-      // Extract shared secret bytes
       final sharedSecretBytes = await sharedSecret.extractBytes();
-
-      // Generate AES key by hashing shared secret with SHA-256
       final aesKey = crypto.sha256.convert(sharedSecretBytes).bytes;
 
       EncryptionLogger.logSharedSecretDerived(
         userId,
         streamId,
-        aesKey.take(8).toString(), // AES key preview for reporting/logging
+        aesKey.take(8).toString(),
       );
 
-      // Store the AES key
-      final streamKeyId = 'stream_key_$streamId';
-      await secureStorage.write(key: streamKeyId, value: base64.encode(aesKey));
+      final username = FirebaseAuth.instance.currentUser?.displayName ?? userId;
+      print(
+          '[KEY_EXCHANGE] [$username] AES-256 key derived (32 bytes) for stream $streamId');
 
-      // print('AES key stored successfully for stream: $streamId');
+      final streamKeyId = 'stream_key_${streamId}_$otherUserId';
+      await secureStorage.write(key: streamKeyId, value: base64.encode(aesKey));
+      print(
+          '[KEY_EXCHANGE] [$username] AES-256 key stored in secure-storage under $streamKeyId');
 
       final storedKey = await secureStorage.read(key: streamKeyId);
       if (storedKey == null) {
@@ -123,13 +124,12 @@ class StreamKeyExchangeService {
         return {'success': false, 'error': 'Failed to store AES key'};
       }
 
-      print('AES key stored successfully for stream: $streamKeyId');
+      print(
+          '[KEY_EXCHANGE] AES key stored successfully for stream: $streamKeyId');
 
-      // Store exchange verification in Firestore
       await _storeExchangeVerification(
           exchangeId, userId, otherUserId, isStreamer, aesKey.length, streamId);
 
-      // Log successful
       await _logKeyExchange(exchangeId, {
         'status': 'completed',
         'endTime': DateTime.now(),
@@ -163,7 +163,6 @@ class StreamKeyExchangeService {
         ...data,
         'timestamp': FieldValue.serverTimestamp(),
       });
-      // print('Key exchange log successfully written.');
     } catch (e) {
       print('Error logging key exchange: $e');
     }
@@ -229,13 +228,15 @@ class StreamKeyExchangeService {
     }
   }
 
-  // Get stored AES key for stream
-  static Future<Uint8List?> getStreamKey(String streamId) async {
+  static Future<Uint8List?> getStreamKey(String streamId,
+      {required String otherUserId}) async {
     try {
       print('Retrieving AES key for stream: $streamId');
-      final keyStr = await secureStorage.read(key: 'stream_key_$streamId');
+      final keyStr =
+          await secureStorage.read(key: 'stream_key_${streamId}_$otherUserId');
       if (keyStr == null) {
-        print('ERROR: No stored AES key found for stream $streamId');
+        print(
+            'ERROR: No stored AES key found for stream $streamId with $otherUserId');
         return null;
       }
 
@@ -248,7 +249,6 @@ class StreamKeyExchangeService {
     }
   }
 
-  // Clean up keys when stream ends
   static Future<void> cleanupStreamKeys(String streamId) async {
     try {
       await secureStorage.delete(key: 'stream_key_$streamId');

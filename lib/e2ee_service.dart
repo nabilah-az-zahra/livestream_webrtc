@@ -9,12 +9,11 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:livestream_webrtc/logger.dart';
 
 class StreamCryptoService {
-  static const int nonceLength = 12; // 96 bits for GCM
+  static const int nonceLength = 12; // 96 bits GCM
   static const int tagLength = 16; // 128 bits authentication tag
-  static const int keyRotationInterval = 3600000; // 1 hour in milliseconds
+  static const int keyRotationInterval = 3600000; // 1 hour
   static const int maxRetries = 3;
 
-  // Track encryption statistics
   static Map<String, dynamic> _stats = {
     'framesProcessed': 0,
     'encryptionErrors': 0,
@@ -22,8 +21,13 @@ class StreamCryptoService {
     'lastKeyRotation': DateTime.now().millisecondsSinceEpoch,
   };
 
-  // Create AES-GCM cipher instance
-  static GCMBlockCipher _createAesGcmCipher(
+  static Uint8List buildAad(String streamId, int timestamp) {
+    final streamBytes = utf8.encode(streamId);
+    final tsBytes = ByteData(4)..setUint32(0, timestamp & 0xFFFFFFFF);
+    return Uint8List.fromList(streamBytes + tsBytes.buffer.asUint8List());
+  }
+
+  static GCMBlockCipher createAesGcmCipher(
       bool forEncryption, Uint8List key, Uint8List nonce,
       {Uint8List? aad}) {
     final cipher = GCMBlockCipher(AESEngine());
@@ -33,15 +37,13 @@ class StreamCryptoService {
     return cipher;
   }
 
-  // Generate secure random bytes
-  static Uint8List _generateNonce() {
+  static Uint8List generateNonce() {
     final secureRandom = SecureRandom('Fortuna')
       ..seed(KeyParameter(Uint8List.fromList(
           List.generate(32, (n) => math.Random.secure().nextInt(256)))));
     return secureRandom.nextBytes(nonceLength);
   }
 
-  // Rotate encryption key
   static Future<bool> rotateStreamKey(String streamId, String userId,
       String otherUserId, bool isStreamer) async {
     try {
@@ -62,129 +64,113 @@ class StreamCryptoService {
     }
   }
 
-  // Encrypt RTCRtpSender data
-  static Future<void> encryptRtpSender(
-    RTCDataChannel channel,
-    String streamId,
-    String userId,
-    String otherUserId,
-    bool isStreamer,
-  ) async {
-    channel.onMessage = (RTCDataChannelMessage message) async {
-      try {
-        final frameData = Uint8List.fromList(utf8.encode(message.text));
-
-        // Log pre-encryption
-        await StreamCryptoLogger.logFrame(
-          streamId: streamId,
-          operation: 'encrypt_start',
-          frameSize: frameData.length,
-          success: true,
-          additionalData: {
-            'userId': userId,
-            'isStreamer': isStreamer,
-          },
-        );
-
-        // Get AES key for encryption
-        final aesKey = await StreamKeyExchangeService.getStreamKey(streamId);
-        if (aesKey == null) throw Exception('Encryption key not found');
-
-        // Generate a secure random nonce
-        final nonce = _generateNonce();
-
-        // Encrypt frame data
-        final cipher = _createAesGcmCipher(true, aesKey, nonce);
-        final encryptedData = cipher.process(frameData);
-
-        final stopwatch = Stopwatch()..start();
-
-        // Append nonce + encrypted frame for transmission
-        final encryptedFrame = Uint8List(nonceLength + encryptedData.length);
-        encryptedFrame.setAll(0, nonce);
-        encryptedFrame.setAll(nonceLength, encryptedData);
-
-        // Encode encrypted frame as Base64 string before sending
-        final encodedMessage = base64.encode(encryptedFrame);
-        channel.send(RTCDataChannelMessage(encodedMessage));
-
-        stopwatch.stop();
-
-        final durationMs = stopwatch.elapsedMilliseconds;
-
-        // print('Encrypted Frame Sent: ${encryptedFrame.length} bytes');
-        EncryptionLogger.logEncryption(
-          streamId,
-          frameData.length,
-          encryptedFrame.length,
-          durationMs,
-          success: true,
-        );
-
-        // Log successful encryption
-        await StreamCryptoLogger.logFrame(
-          streamId: streamId,
-          operation: 'encrypt_complete',
-          frameSize: encryptedFrame.length,
-          success: true,
-          additionalData: {
-            'originalSize': frameData.length,
-            'encryptedSize': encryptedFrame.length,
-          },
-        );
-      } catch (e) {
-        await StreamCryptoLogger.logFrame(
-          streamId: streamId,
-          operation: 'encrypt_error',
-          frameSize: 0,
-          success: false,
-          error: e.toString(),
-        );
-        print('Error encrypting frame: $e');
-      }
-    };
-  }
-
-  // Decrypt RTCRtpReceiver data with retry mechanism
   static Future<void> decryptRtpReceiver(
     RTCDataChannel channel,
     String streamId,
     String userId,
     String otherUserId,
-    bool isStreamer,
-  ) async {
+    bool isStreamer, {
+    void Function(Uint8List frameBytes)? onFrameDecrypted,
+  }) async {
     channel.onMessage = (RTCDataChannelMessage message) async {
       try {
-        // Decode Base64 string back to Uint8List
+        print(
+            '[E2EE] Viewer received data over channel: ${message.text.length} chars');
+
         final encryptedData = base64.decode(message.text);
 
-        // Extract nonce and ciphertext
-        final nonce = encryptedData.sublist(0, nonceLength);
-        final ciphertext = encryptedData.sublist(nonceLength);
+        if (encryptedData.length < nonceLength)
+          throw Exception('Invalid payload');
 
-        // Get AES key for decryption
-        final aesKey = await StreamKeyExchangeService.getStreamKey(streamId);
+        final nonce = encryptedData.sublist(0, nonceLength);
+        final timestampOffset = encryptedData.length - 4;
+        if (timestampOffset < 0) throw Exception("Encrypted payload too short");
+        final timestamp =
+            ByteData.sublistView(encryptedData, timestampOffset).getUint32(0);
+        final aad = buildAad(streamId, timestamp);
+
+        final ciphertext = encryptedData.sublist(nonceLength, timestampOffset);
+
+        print('[AAD] Viewer timestamp extracted from payload: $timestamp');
+
+        final aesKey = await StreamKeyExchangeService.getStreamKey(streamId,
+            otherUserId: otherUserId);
         if (aesKey == null) throw Exception('Decryption key not found');
 
         final stopwatch = Stopwatch()..start();
 
-        // Decrypt frame data
-        final cipher = _createAesGcmCipher(false, aesKey, nonce);
+        final cipher = createAesGcmCipher(false, aesKey, nonce, aad: aad);
         final decryptedData = cipher.process(ciphertext);
+        print('Decrypted Frame Received: ${decryptedData.length} bytes');
 
         stopwatch.stop();
 
         final durationMs = stopwatch.elapsedMilliseconds;
-
-        // print('Decrypted Frame Received: ${decryptedData.length} bytes');
+        if (onFrameDecrypted != null) {
+          onFrameDecrypted(decryptedData);
+        }
         EncryptionLogger.logDecryption(streamId, durationMs, success: true);
+
+        _stats['framesProcessed'] += 1;
       } catch (e) {
+        _stats['decryptionErrors'] += 1;
         print('Error decrypting frame: $e');
       }
     };
   }
 
-  // Get encryption stats
+  static Future<void> sendEncryptedFrame(
+    RTCDataChannel channel,
+    Uint8List frameBytes,
+    String streamId,
+    String viewerId,
+  ) async {
+    try {
+      if (channel.state != RTCDataChannelState.RTCDataChannelOpen) {
+        print('[WARN] Tried to send frame, but data channel is not open.');
+        return;
+      }
+
+      final aesKey = await StreamKeyExchangeService.getStreamKey(streamId,
+          otherUserId: viewerId);
+      if (aesKey == null) throw Exception('Encryption key not found');
+
+      final nonce = generateNonce();
+
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final aad = buildAad(streamId, timestamp);
+
+      final cipher = createAesGcmCipher(true, aesKey, nonce, aad: aad);
+      final cipherText = cipher.process(frameBytes);
+
+      final payload = Uint8List(nonceLength + cipherText.length + 4)
+        ..setRange(0, nonceLength, nonce)
+        ..setRange(nonceLength, nonceLength + cipherText.length, cipherText)
+        ..buffer
+            .asByteData()
+            .setUint32(nonceLength + cipherText.length, timestamp);
+
+      print('[AAD] Streamer timestamp used in AAD: $timestamp');
+
+      final stopwatch = Stopwatch()..start();
+      channel.send(RTCDataChannelMessage(base64.encode(payload)));
+      stopwatch.stop();
+
+      _stats['framesProcessed'] += 1;
+
+      EncryptionLogger.logEncryption(
+        streamId,
+        frameBytes.length,
+        payload.length,
+        stopwatch.elapsedMilliseconds,
+        success: true,
+      );
+    } catch (e) {
+      _stats['encryptionErrors'] += 1;
+      print('Error encrypting frame: $e');
+    }
+  }
+
   static Map<String, dynamic> getStats() {
     return {
       ..._stats,
@@ -195,7 +181,6 @@ class StreamCryptoService {
     };
   }
 
-  // Reset stats
   static void resetStats() {
     _stats = {
       'framesProcessed': 0,
@@ -205,77 +190,49 @@ class StreamCryptoService {
     };
   }
 
-  // Helper to verify encryption is working with current key
-  static Future<bool> verifyEncryption(String streamId) async {
+  static Future<bool> verifyEncryption(
+    String streamId,
+    String viewerId,
+  ) async {
     try {
-      // print('Verifying encryption for stream: $streamId');
-
-      final aesKey = await StreamKeyExchangeService.getStreamKey(streamId);
+      final aesKey = await StreamKeyExchangeService.getStreamKey(streamId,
+          otherUserId: viewerId);
       if (aesKey == null) {
         print(
             'Verification failed: No encryption key found for stream $streamId');
         return false;
       }
 
-      // Verify key length
       if (aesKey.length != 32) {
         print('Verification failed: Invalid key length ${aesKey.length} bytes');
         return false;
       }
 
-      // Create test data
-      final testData =
-          Uint8List.fromList(List.generate(32, (index) => index % 256));
-
-      // Generate nonce for the test
-      final nonce = _generateNonce();
+      final testData = Uint8List.fromList(List.generate(32, (i) => i % 256));
+      final nonce = generateNonce();
       if (nonce.length != nonceLength) {
         print(
             'Verification failed: Invalid nonce length ${nonce.length} bytes');
         return false;
       }
-
-      // Create authenticated data
-      final aad = ByteData(12);
-      aad.setUint32(0, 0);
-      aad.setUint32(4, DateTime.now().millisecondsSinceEpoch & 0xFFFFFFFF);
-      final aadBytes = aad.buffer.asUint8List();
-
-      // Test encryption
-      // print('Attempting to encrypt test data...');
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final testAad = buildAad(streamId, timestamp);
       final encryptCipher =
-          _createAesGcmCipher(true, aesKey, nonce, aad: aadBytes);
-      if (encryptCipher == null) {
-        print('Verification failed: Could not create encryption cipher');
-        return false;
-      }
-
-      // print('Attempting to encrypt test data...');
+          createAesGcmCipher(true, aesKey, nonce, aad: testAad);
       final encrypted = encryptCipher.process(testData);
-      // print(
-      //     'Test encryption successful. Encrypted length: ${encrypted.length} bytes');
-
-      // Test decryption
-      // print('Attempting to decrypt test data...');
       final decryptCipher =
-          _createAesGcmCipher(false, aesKey, nonce, aad: aadBytes);
+          createAesGcmCipher(false, aesKey, nonce, aad: testAad);
+      final decrypted = decryptCipher.process(encrypted);
       if (decryptCipher == null) {
         print('Verification failed: Could not create decryption cipher');
         return false;
       }
 
-      // print('Attempting to decrypt test data...');
-      final decrypted = decryptCipher.process(encrypted);
-      // print(
-      //     'Test decryption successful. Decrypted length: ${decrypted.length} bytes');
-
-      // Verify the round trip
       if (!listEquals(testData, decrypted)) {
         print('Verification failed: Data mismatch after decryption');
         return false;
       }
 
-      // Log successful verification
       await StreamCryptoLogger.logFrame(
         streamId: streamId,
         operation: 'verify_encryption',
@@ -288,21 +245,18 @@ class StreamCryptoService {
         },
       );
 
-      // print('Encryption verification successful for stream $streamId');
-
       return true;
-    } catch (e, stackTrace) {
+    } catch (e, stack) {
       print('Encryption verification failed with error: $e');
-      print('Stack trace: $stackTrace');
+      print('Verification failed: $e\n$stack');
 
-      // Log the failure
       await StreamCryptoLogger.logFrame(
         streamId: streamId,
         operation: 'verify_encryption',
         frameSize: 0,
         success: false,
         error: e.toString(),
-        additionalData: {'stackTrace': stackTrace.toString()},
+        additionalData: {'stackTrace': stack.toString()},
       );
       return false;
     }

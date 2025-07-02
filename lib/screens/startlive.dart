@@ -1,5 +1,9 @@
+import 'dart:async';
+import 'dart:ui' as ui;
+import 'dart:typed_data';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -18,14 +22,14 @@ class StartLivePage extends StatefulWidget {
 
 class _StartLivePageState extends State<StartLivePage> {
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
-  final _signalingService = SignalingService('http://localhost:3000');
+  final _signalingService = SignalingService();
   final TextEditingController _titleController = TextEditingController();
-  RTCPeerConnection? _peerConnection;
+
   MediaStream? _localStream;
-  RTCDataChannel? _encryptedVideoChannel;
   bool _isEncryptionReady = false;
   bool _isSettingUp = false;
   bool _isCameraInitialized = false;
+  final GlobalKey _captureKey = GlobalKey();
 
   @override
   void initState() {
@@ -65,103 +69,13 @@ class _StartLivePageState extends State<StartLivePage> {
     }
   }
 
-  Future<RTCPeerConnection> _createPeerConnection() async {
-    final Map<String, dynamic> configuration = {
-      'iceServers': [
-        {
-          'urls': [
-            'stun:stun1.l.google.com:19302',
-            'stun:stun2.l.google.com:19302',
-            'stun:stun3.l.google.com:19302',
-            'stun:stun4.l.google.com:19302',
-          ],
-        }
-      ],
-      'sdpSemantics': 'unified-plan',
-      'iceTransportPolicy': 'all',
-      'bundlePolicy': 'max-bundle',
-      'rtcpMuxPolicy': 'require',
-    };
-
-    final conn = await createPeerConnection(configuration);
-    if (conn == null) {
-      throw Exception('Failed to create peer connection');
-    }
-    return conn;
-  }
-
-  Future<void> _setupPeerConnection(String streamId) async {
-    try {
-      _peerConnection = await _createPeerConnection();
-
-      final dataChannelInit = RTCDataChannelInit()
-        ..ordered = true
-        ..protocol = 'video-e2ee';
-
-      _encryptedVideoChannel = await _peerConnection!
-          .createDataChannel('video-e2ee', dataChannelInit);
-
-      await StreamCryptoService.encryptRtpSender(
-        _encryptedVideoChannel!,
-        streamId,
-        FirebaseAuth.instance.currentUser!.uid,
-        FirebaseAuth.instance.currentUser!.uid,
-        true,
-      );
-
-      // Verify encryption is working
-      // print('Attempting to verify stream encryption...');
-      final encryptionVerified =
-          await StreamCryptoService.verifyEncryption(streamId);
-      if (!encryptionVerified) {
-        throw Exception(
-            'Stream encryption verification failed. Check logs for details.');
-      }
-      // print('Stream encryption verified successfully');
-
-      setState(() {
-        _isEncryptionReady = true;
-      });
-
-      _peerConnection?.onIceCandidate = (candidate) {
-        if (candidate != null) {
-          _signalingService.sendIceCandidate(streamId, candidate);
-        }
-      };
-
-      _localStream!.getTracks().forEach((track) {
-        _peerConnection?.addTrack(track, _localStream!);
-      });
-
-      _signalingService.connect();
-      _signalingService.joinStream(streamId, true);
-
-      // Handle viewer connections
-      _signalingService.onViewerJoined((viewerId) async {
-        EncryptionLogger.logEndToEndFlow(
-          streamerId: FirebaseAuth.instance.currentUser?.uid ?? 'unknown',
-          viewerId: viewerId,
-        );
-        if (_peerConnection != null) {
-          RTCSessionDescription offer = await _peerConnection!.createOffer();
-          await _peerConnection!.setLocalDescription(offer);
-          _signalingService.sendOffer(streamId, viewerId, offer);
-        }
-      });
-
-      _signalingService.onAnswer((data) async {
-        if (data['answer'] != null && _peerConnection != null) {
-          final answer = RTCSessionDescription(
-            data['answer']['sdp'],
-            data['answer']['type'],
-          );
-          await _peerConnection?.setRemoteDescription(answer);
-        }
-      });
-    } catch (e) {
-      print('Error setting up connection: $e');
-      rethrow;
-    }
+  Future<Uint8List?> _captureFrame() async {
+    final boundary = _captureKey.currentContext?.findRenderObject()
+        as RenderRepaintBoundary?;
+    if (boundary == null) return null;
+    final image = await boundary.toImage(pixelRatio: 0.5);
+    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+    return byteData?.buffer.asUint8List();
   }
 
   void _startLive() async {
@@ -172,6 +86,7 @@ class _StartLivePageState extends State<StartLivePage> {
       return;
     }
 
+    if (_isSettingUp) return;
     setState(() => _isSettingUp = true);
 
     try {
@@ -184,9 +99,6 @@ class _StartLivePageState extends State<StartLivePage> {
       final String streamerId = currentUser.uid;
       final String streamerUsername = currentUser.displayName ?? 'Unknown';
 
-      // print('Using streamId: $streamId for key exchange');
-
-      // Generate and store the stream key first
       final keyExchange = await StreamKeyExchangeService.generateSharedSecret(
         currentUser.uid,
         currentUser.uid,
@@ -199,7 +111,6 @@ class _StartLivePageState extends State<StartLivePage> {
             'Failed to setup stream encryption: ${keyExchange['error']}');
       }
 
-      // Verify key exchange
       final verification = await StreamKeyExchangeService.verifyKeyExchange(
         keyExchange['exchangeId'],
         streamId: streamId,
@@ -210,10 +121,6 @@ class _StartLivePageState extends State<StartLivePage> {
         throw Exception('Key exchange verification failed');
       }
 
-      // print('Exchange verified successfully');
-      // print('Exchange details: ${verification['exchange']}');
-      // print('Exchange logs: ${verification['logs']}');
-
       EncryptionLogger.logMessage(
           '[KEY_EXCHANGE] Exchange verified successfully.');
       if (verification['logs'] != null && verification['logs'].isNotEmpty) {
@@ -223,8 +130,11 @@ class _StartLivePageState extends State<StartLivePage> {
         EncryptionLogger.logMessage('[KEY_EXCHANGE] No logs available');
       }
 
-      // Setup peer connection with encryption
-      await _setupPeerConnection(streamId);
+      final encryptionVerified =
+          await StreamCryptoService.verifyEncryption(streamId, currentUser.uid);
+      if (!encryptionVerified) {
+        throw Exception('Stream encryption verification failed');
+      }
 
       await FirebaseFirestore.instance.collection('streams').doc(streamId).set({
         'streamId': streamId,
@@ -236,8 +146,6 @@ class _StartLivePageState extends State<StartLivePage> {
         'viewerCount': 0,
         'encryptionReady': false,
       });
-
-      await _setupPeerConnection(streamId);
 
       await FirebaseFirestore.instance
           .collection('streams')
@@ -307,12 +215,10 @@ class _StartLivePageState extends State<StartLivePage> {
 
   @override
   void dispose() {
-    _encryptedVideoChannel?.close();
     _signalingService.disconnect();
     _localStream?.getTracks().forEach((track) => track.stop());
     _localStream?.dispose();
     _localRenderer.dispose();
-    _peerConnection?.dispose();
     _titleController.dispose();
     super.dispose();
   }
@@ -348,11 +254,14 @@ class _StartLivePageState extends State<StartLivePage> {
               child: Container(
                 color: Colors.black,
                 child: _isCameraInitialized
-                    ? RTCVideoView(
-                        _localRenderer,
-                        objectFit:
-                            RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                        mirror: true,
+                    ? RepaintBoundary(
+                        key: _captureKey,
+                        child: RTCVideoView(
+                          _localRenderer,
+                          objectFit:
+                              RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                          mirror: true,
+                        ),
                       )
                     : const Center(
                         child: CircularProgressIndicator(
