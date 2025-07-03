@@ -4,9 +4,6 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:livestream_webrtc/screens/login.dart';
 import 'package:livestream_webrtc/ecdh_service.dart';
-import 'package:livestream_webrtc/logger.dart';
-
-bool isObscure = false;
 
 class RegisterPage extends StatefulWidget {
   const RegisterPage({super.key});

@@ -84,7 +84,7 @@ class ConnectionMonitor {
   Timer? _reconnectTimer;
   bool _wasConnected = false;
   int _reconnectAttempts = 0;
-  static const int MAX_RECONNECT_ATTEMPTS = 5;
+  static const int maxReconnectAttempts = 5;
 
   ConnectionMonitor({
     required this.peerConnection,
@@ -124,7 +124,7 @@ class ConnectionMonitor {
   void _handleDisconnection() {
     onConnectionLost();
 
-    if (_reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+    if (_reconnectAttempts < maxReconnectAttempts) {
       _reconnectTimer = Timer(const Duration(seconds: 3), () {
         _attemptReconnection();
       });
@@ -154,7 +154,7 @@ class ConnectionMonitor {
     } catch (e) {
       print('Reconnection attempt failed: $e');
 
-      if (_reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+      if (_reconnectAttempts < maxReconnectAttempts) {
         _reconnectTimer = Timer(
             Duration(seconds: _reconnectAttempts * 2), _attemptReconnection);
       }
@@ -193,7 +193,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
   final Map<String, bool> _connectionStates = {};
   final List<RTCIceCandidate> _pendingCandidates = [];
   final Map<String, RTCDataChannel> _viewerDataChannels = {};
-  final GlobalKey _captureKey = GlobalKey();
   final GlobalKey _previewContainerKey = GlobalKey();
   final Map<String, Uint8List?> _cachedKeys = {};
 
@@ -214,7 +213,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
   bool _remoteDescriptionSet = false;
   bool _isEncryptionReady = false;
   bool _isFrameSendingActive = false;
-  bool _isCapturing = false;
 
   StreamSubscription? _streamStatusSubscription;
   StreamSubscription? _chatSubscription;
@@ -539,21 +537,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         }
       });
     });
-  }
-
-  Future<void> _preloadKeyForViewer(String viewerId) async {
-    try {
-      final aesKey = await StreamKeyExchangeService.getStreamKey(
-        widget.streamId,
-        otherUserId: viewerId,
-      );
-      if (aesKey != null) {
-        _cachedKeys[viewerId] = aesKey;
-        print('[STREAMER] Key cached for viewer: $viewerId');
-      }
-    } catch (e) {
-      print('[STREAMER] Failed to preload key for $viewerId: $e');
-    }
   }
 
   Future<void> _dumpEncrypted(Uint8List encrypted) async {
@@ -1147,24 +1130,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       print('[VIEWER] Frame decryption error: $e');
       print('[VIEWER] Stack trace: ${StackTrace.current}');
     }
-  }
-
-  Future<void> _copyToDownloads(File file) async {
-    final hasPermission = await Permission.storage.request();
-    if (!hasPermission.isGranted) {
-      print('[VIEWER] Storage permission denied');
-      return;
-    }
-
-    final downloadsDir = Directory('/storage/emulated/0/Download/code');
-    if (!await downloadsDir.exists()) {
-      print('[VIEWER] Downloads directory does not exist');
-      return;
-    }
-
-    final newFile =
-        await file.copy('${downloadsDir.path}/${file.uri.pathSegments.last}');
-    print('[VIEWER] Frame copied to: ${newFile.path}');
   }
 
   Future<void> _preloadViewerKey() async {

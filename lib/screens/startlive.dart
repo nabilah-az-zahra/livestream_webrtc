@@ -1,9 +1,6 @@
 import 'dart:async';
-import 'dart:ui' as ui;
-import 'dart:typed_data';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -26,7 +23,6 @@ class _StartLivePageState extends State<StartLivePage> {
   final TextEditingController _titleController = TextEditingController();
 
   MediaStream? _localStream;
-  bool _isEncryptionReady = false;
   bool _isSettingUp = false;
   bool _isCameraInitialized = false;
   final GlobalKey _captureKey = GlobalKey();
@@ -67,15 +63,6 @@ class _StartLivePageState extends State<StartLivePage> {
         );
       }
     }
-  }
-
-  Future<Uint8List?> _captureFrame() async {
-    final boundary = _captureKey.currentContext?.findRenderObject()
-        as RenderRepaintBoundary?;
-    if (boundary == null) return null;
-    final image = await boundary.toImage(pixelRatio: 0.5);
-    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-    return byteData?.buffer.asUint8List();
   }
 
   void _startLive() async {
@@ -182,24 +169,6 @@ class _StartLivePageState extends State<StartLivePage> {
       if (mounted) {
         setState(() => _isSettingUp = false);
       }
-    }
-  }
-
-  Future<Map<String, dynamic>?> getStreamInfo(String streamId) async {
-    try {
-      final streamDoc = await FirebaseFirestore.instance
-          .collection('streams')
-          .doc(streamId)
-          .get();
-
-      if (!streamDoc.exists) {
-        return null;
-      }
-
-      return streamDoc.data();
-    } catch (e) {
-      print('Error fetching stream info: $e');
-      return null;
     }
   }
 

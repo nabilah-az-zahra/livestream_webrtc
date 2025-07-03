@@ -1,12 +1,9 @@
-import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:pointycastle/export.dart';
 import 'dart:math' as math;
 import 'dart:convert';
 import 'package:livestream_webrtc/exchange_service.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:livestream_webrtc/logger.dart';
 
 class StreamCryptoService {
   static const int nonceLength = 12; // 96 bits GCM
@@ -61,113 +58,6 @@ class StreamCryptoService {
     } catch (e) {
       print('Error rotating stream key: $e');
       return false;
-    }
-  }
-
-  static Future<void> decryptRtpReceiver(
-    RTCDataChannel channel,
-    String streamId,
-    String userId,
-    String otherUserId,
-    bool isStreamer, {
-    void Function(Uint8List frameBytes)? onFrameDecrypted,
-  }) async {
-    channel.onMessage = (RTCDataChannelMessage message) async {
-      try {
-        print(
-            '[E2EE] Viewer received data over channel: ${message.text.length} chars');
-
-        final encryptedData = base64.decode(message.text);
-
-        if (encryptedData.length < nonceLength)
-          throw Exception('Invalid payload');
-
-        final nonce = encryptedData.sublist(0, nonceLength);
-        final timestampOffset = encryptedData.length - 4;
-        if (timestampOffset < 0) throw Exception("Encrypted payload too short");
-        final timestamp =
-            ByteData.sublistView(encryptedData, timestampOffset).getUint32(0);
-        final aad = buildAad(streamId, timestamp);
-
-        final ciphertext = encryptedData.sublist(nonceLength, timestampOffset);
-
-        print('[AAD] Viewer timestamp extracted from payload: $timestamp');
-
-        final aesKey = await StreamKeyExchangeService.getStreamKey(streamId,
-            otherUserId: otherUserId);
-        if (aesKey == null) throw Exception('Decryption key not found');
-
-        final stopwatch = Stopwatch()..start();
-
-        final cipher = createAesGcmCipher(false, aesKey, nonce, aad: aad);
-        final decryptedData = cipher.process(ciphertext);
-        print('Decrypted Frame Received: ${decryptedData.length} bytes');
-
-        stopwatch.stop();
-
-        final durationMs = stopwatch.elapsedMilliseconds;
-        if (onFrameDecrypted != null) {
-          onFrameDecrypted(decryptedData);
-        }
-        EncryptionLogger.logDecryption(streamId, durationMs, success: true);
-
-        _stats['framesProcessed'] += 1;
-      } catch (e) {
-        _stats['decryptionErrors'] += 1;
-        print('Error decrypting frame: $e');
-      }
-    };
-  }
-
-  static Future<void> sendEncryptedFrame(
-    RTCDataChannel channel,
-    Uint8List frameBytes,
-    String streamId,
-    String viewerId,
-  ) async {
-    try {
-      if (channel.state != RTCDataChannelState.RTCDataChannelOpen) {
-        print('[WARN] Tried to send frame, but data channel is not open.');
-        return;
-      }
-
-      final aesKey = await StreamKeyExchangeService.getStreamKey(streamId,
-          otherUserId: viewerId);
-      if (aesKey == null) throw Exception('Encryption key not found');
-
-      final nonce = generateNonce();
-
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final aad = buildAad(streamId, timestamp);
-
-      final cipher = createAesGcmCipher(true, aesKey, nonce, aad: aad);
-      final cipherText = cipher.process(frameBytes);
-
-      final payload = Uint8List(nonceLength + cipherText.length + 4)
-        ..setRange(0, nonceLength, nonce)
-        ..setRange(nonceLength, nonceLength + cipherText.length, cipherText)
-        ..buffer
-            .asByteData()
-            .setUint32(nonceLength + cipherText.length, timestamp);
-
-      print('[AAD] Streamer timestamp used in AAD: $timestamp');
-
-      final stopwatch = Stopwatch()..start();
-      channel.send(RTCDataChannelMessage(base64.encode(payload)));
-      stopwatch.stop();
-
-      _stats['framesProcessed'] += 1;
-
-      EncryptionLogger.logEncryption(
-        streamId,
-        frameBytes.length,
-        payload.length,
-        stopwatch.elapsedMilliseconds,
-        success: true,
-      );
-    } catch (e) {
-      _stats['encryptionErrors'] += 1;
-      print('Error encrypting frame: $e');
     }
   }
 

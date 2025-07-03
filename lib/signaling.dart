@@ -140,7 +140,6 @@ class SignalingService {
   void disconnect() {
     if (!_isConnected) return;
     _socket.disconnect();
-    _socket.dispose();
     _isConnected = false;
   }
 }

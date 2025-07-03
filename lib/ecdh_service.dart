@@ -5,6 +5,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:crypto/crypto.dart' as crypto;
+import 'dart:math' as math;
 
 class EcdhService {
   static final algorithm = X25519();
@@ -223,9 +224,9 @@ class EcdhService {
     try {
       final localKey = await getPrivateKeyFromStorage(userId);
       if (localKey != null) {
-        final prefix = localKey.sublist(0, min(4, localKey.length));
+        final prefix = localKey.sublist(0, math.min(4, localKey.length));
         final suffix =
-            localKey.sublist(max(0, localKey.length - 4), localKey.length);
+            localKey.sublist(math.max(0, localKey.length - 4), localKey.length);
 
         return {
           'exists': true,
@@ -346,16 +347,4 @@ class EcdhService {
   static Uint8List stringToBytes(String str) {
     return base64Decode(str);
   }
-
-  static String bytesToHex(Uint8List bytes) {
-    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  }
-
-  static Uint8List hexToBytes(String hex) {
-    return Uint8List.fromList(List.generate(hex.length ~/ 2,
-        (i) => int.parse(hex.substring(i * 2, i * 2 + 2), radix: 16)));
-  }
-
-  static int min(int a, int b) => a < b ? a : b;
-  static int max(int a, int b) => a > b ? a : b;
 }

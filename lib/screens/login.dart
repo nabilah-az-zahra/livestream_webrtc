@@ -1,5 +1,4 @@
 import 'dart:typed_data';
-import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -7,8 +6,6 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:livestream_webrtc/screens/homepage.dart';
 import 'package:livestream_webrtc/screens/register.dart';
 import 'package:livestream_webrtc/ecdh_service.dart';
-
-bool isObscure = false;
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
