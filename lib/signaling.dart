@@ -8,7 +8,7 @@ class SignalingService {
   factory SignalingService() => _instance;
 
   late IO.Socket _socket;
-  final String _serverUrl = 'http://192.168.1.10:3000';
+  final String _serverUrl = 'https://socket-server-production-23a9.up.railway.app';
   bool _isConnected = false;
 
   SignalingService._internal() {
