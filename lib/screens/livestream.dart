@@ -1,37 +1,45 @@
 import 'dart:async';
-import 'dart:math';
-import 'dart:ui' as ui;
-import 'package:flutter/rendering.dart';
-import 'package:flutter/foundation.dart';
+import 'dart:collection';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
+import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
+import 'package:camera/camera.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:http/http.dart' as http;
+import 'package:image/image.dart' as img;
+import 'package:livekit_client/livekit_client.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'dart:typed_data';
-import 'dart:convert';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:livestream_webrtc/signaling.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:livestream_webrtc/main.dart';
+import 'package:livestream_webrtc/livekit_service.dart';
 import 'package:livestream_webrtc/exchange_service.dart';
 import 'package:livestream_webrtc/e2ee_service.dart';
 import 'package:livestream_webrtc/logger.dart';
 
 class LiveStreamPage extends StatefulWidget {
   final String streamTitle;
-  final String streamerId;
-  final String streamerUsername;
   final String streamId;
   final bool isStreamer;
+  final String streamerId;
+  final String streamerUsername;
+  final String liveKitUrl;
 
   const LiveStreamPage({
     super.key,
     required this.streamTitle,
-    required this.streamerId,
-    required this.streamerUsername,
     required this.streamId,
     required this.isStreamer,
+    required this.streamerId,
+    required this.streamerUsername,
+    required this.liveKitUrl,
   });
 
   @override
@@ -75,136 +83,107 @@ class ChatMessage {
   }
 }
 
-class ConnectionMonitor {
-  final RTCPeerConnection peerConnection;
-  final String streamId;
-  final Function() onConnectionLost;
-  final Function() onConnectionRestored;
-  Timer? _monitorTimer;
-  Timer? _reconnectTimer;
-  bool _wasConnected = false;
-  int _reconnectAttempts = 0;
-  static const int maxReconnectAttempts = 5;
+Uint8List isolateConvertYUV420ToJPEG(Map<String, dynamic> params) {
+  final CameraImage image = params['image'];
+  final int width = image.width;
+  final int height = image.height;
 
-  ConnectionMonitor({
-    required this.peerConnection,
-    required this.streamId,
-    required this.onConnectionLost,
-    required this.onConnectionRestored,
-  }) {
-    _setupConnectionMonitoring();
-  }
+  final int uvRowStride = image.planes[1].bytesPerRow;
+  final int uvPixelStride = image.planes[1].bytesPerPixel!;
 
-  void _setupConnectionMonitoring() {
-    peerConnection.onConnectionState = (RTCPeerConnectionState state) {
-      switch (state) {
-        case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
-          _wasConnected = true;
-          _reconnectAttempts = 0;
-          onConnectionRestored();
-          break;
+  final img.Image imgImage = img.Image(width: width, height: height);
 
-        case RTCPeerConnectionState.RTCPeerConnectionStateDisconnected:
-        case RTCPeerConnectionState.RTCPeerConnectionStateFailed:
-          if (_wasConnected) {
-            _handleDisconnection();
-          }
-          break;
+  for (int y = 0; y < height; y++) {
+    for (int x = 0; x < width; x++) {
+      final int yIndex = y * image.planes[0].bytesPerRow + x;
+      final int uvIndex = (y ~/ 2) * uvRowStride + (x ~/ 2) * uvPixelStride;
 
-        default:
-          break;
-      }
-    };
+      final int yValue = image.planes[0].bytes[yIndex];
+      final int uValue = image.planes[1].bytes[uvIndex];
+      final int vValue = image.planes[2].bytes[uvIndex];
 
-    _monitorTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
-      _checkConnection();
-    });
-  }
+      final int r = (yValue + 1.402 * (vValue - 128)).round().clamp(0, 255);
+      final int g =
+          (yValue - 0.344136 * (uValue - 128) - 0.714136 * (vValue - 128))
+              .round()
+              .clamp(0, 255);
+      final int b = (yValue + 1.772 * (uValue - 128)).round().clamp(0, 255);
 
-  void _handleDisconnection() {
-    onConnectionLost();
-
-    if (_reconnectAttempts < maxReconnectAttempts) {
-      _reconnectTimer = Timer(const Duration(seconds: 3), () {
-        _attemptReconnection();
-      });
-    } else {
-      // print('Max reconnection attempts reached');
+      imgImage.setPixelRgba(x, y, r, g, b, 255);
     }
   }
 
-  Future<void> _attemptReconnection() async {
-    _reconnectAttempts++;
+  final rotatedImage = img.copyRotate(imgImage, angle: -90);
+  return Uint8List.fromList(img.encodeJpg(rotatedImage, quality: 80));
+}
 
-    try {
-      final offer = await peerConnection.createOffer({
-        'offerToReceiveAudio': true,
-        'offerToReceiveVideo': true,
-        'iceRestart': true
-      });
+Future<Uint8List> isolateEncryptFrame(Map<String, dynamic> params) async {
+  final Uint8List frameBytes = params['frameBytes'];
+  final Uint8List aesKey = params['aesKey'];
+  final String streamId = params['streamId'];
+  final int timestamp = params['timestamp'];
 
-      await peerConnection.setLocalDescription(offer);
+  final nonce = StreamCryptoService.generateNonce();
+  final aad = StreamCryptoService.buildAad(streamId, timestamp);
+  final cipher =
+      StreamCryptoService.createAesGcmCipher(true, aesKey, nonce, aad: aad);
 
-      await FirebaseFirestore.instance.collection('connection_logs').add({
-        'streamId': streamId,
-        'event': 'reconnection_attempt',
-        'attempt': _reconnectAttempts,
-        'timestamp': FieldValue.serverTimestamp(),
-      });
-    } catch (e) {
-      print('Reconnection attempt failed: $e');
+  final encrypted = cipher.process(frameBytes);
 
-      if (_reconnectAttempts < maxReconnectAttempts) {
-        _reconnectTimer = Timer(
-            Duration(seconds: _reconnectAttempts * 2), _attemptReconnection);
-      }
-    }
-  }
+  final payload =
+      Uint8List(StreamCryptoService.nonceLength + encrypted.length + 4);
+  payload.setRange(0, StreamCryptoService.nonceLength, nonce);
+  payload.setRange(StreamCryptoService.nonceLength,
+      StreamCryptoService.nonceLength + encrypted.length, encrypted);
+  payload.buffer
+      .asByteData()
+      .setUint32(StreamCryptoService.nonceLength + encrypted.length, timestamp);
 
-  Future<void> _checkConnection() async {
-    if (peerConnection.connectionState ==
-        RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-      final stats = await peerConnection.getStats();
-      bool hasActiveDataChannel = false;
+  return payload;
+}
 
-      stats.forEach((stat) {
-        if (stat.type == 'data-channel' && stat.values['state'] == 'open') {
-          hasActiveDataChannel = true;
-        }
-      });
+Future<Uint8List> _isolateDecryptFrame(Map<String, dynamic> params) async {
+  final Uint8List encrypted = params['encrypted'];
+  final Uint8List aesKey = params['aesKey'];
+  final Uint8List nonce = params['nonce'];
+  final String streamId = params['streamId'];
+  final int timestamp = params['timestamp'];
 
-      if (!hasActiveDataChannel) {
-        _handleDisconnection();
-      }
-    }
-  }
+  final aad = StreamCryptoService.buildAad(streamId, timestamp);
+  final cipher =
+      StreamCryptoService.createAesGcmCipher(false, aesKey, nonce, aad: aad);
 
-  void dispose() {
-    _monitorTimer?.cancel();
-    _reconnectTimer?.cancel();
-  }
+  return cipher.process(encrypted);
 }
 
 class _LiveStreamPageState extends State<LiveStreamPage> {
-  final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
-  final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
-  final _signalingService = SignalingService();
-  final Map<String, RTCPeerConnection> _peerConnections = {};
-  final Map<String, bool> _connectionStates = {};
-  final List<RTCIceCandidate> _pendingCandidates = [];
-  final Map<String, RTCDataChannel> _viewerDataChannels = {};
   final GlobalKey _previewContainerKey = GlobalKey();
   final Map<String, Uint8List?> _cachedKeys = {};
+  final LiveKitService _liveKitService = LiveKitService();
+  final Set<String> _connectedViewers = {};
+  final Map<int, Map<int, Uint8List>> _frameChunks = {};
+  final Map<int, int> _expectedChunks = {};
+  late CameraController _cameraController;
+  Widget? _cameraPreviewWidget;
 
-  RTCPeerConnection? _peerConnection;
-  RTCDataChannel? _encryptedVideoChannel;
   Timer? _frameTimer;
   Timer? _keyRotationTimer;
   Timer? _keyRefreshTimer;
-  MediaStream? _localStream;
-  MediaStream? _remoteStream;
-  ConnectionMonitor? _connectionMonitor;
+  Timer? _fpsTimer;
   Uint8List? _currentFrame;
+
+  bool _isImageStreamActive = false;
+  Uint8List? _latestFrameBytes;
+
+  bool _isStreamingActive = false;
+  final Queue<Uint8List> _frameQueue = Queue<Uint8List>();
+  Timer? _displayTimer;
+
+  int _streamerFramesSent = 0;
+  int _viewerFramesReceived = 0;
+  double _streamerFPS = 0.0;
+  double _viewerFPS = 0.0;
+  DateTime _lastFpsUpdate = DateTime.now();
 
   bool _isLoading = true;
   bool _hasError = false;
@@ -213,6 +192,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
   bool _remoteDescriptionSet = false;
   bool _isEncryptionReady = false;
   bool _isFrameSendingActive = false;
+  bool _isCapturing = false;
 
   StreamSubscription? _streamStatusSubscription;
   StreamSubscription? _chatSubscription;
@@ -228,40 +208,43 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
   void initState() {
     super.initState();
     if (FirebaseAuth.instance.currentUser != null) {
-      _initializeStream().then((_) {
-        if (widget.isStreamer) {
-          _startEncryptedFrameSender();
-
-          Timer(const Duration(seconds: 1), () {
-            print(
-                '[STREAMER] 1-second check - Frame sending active: $_isFrameSendingActive');
-            print(
-                '[STREAMER] Connected viewers: ${_viewerDataChannels.length}');
-          });
-
-          Timer(const Duration(seconds: 3), () {
-            _isFrameSendingActive = true;
-            print('[STREAMER] Frame sending activated after 3 seconds');
-            print('[STREAMER] Data channels status:');
-            _viewerDataChannels.forEach((viewerId, dc) {
-              print('  - $viewerId: ${dc.state}');
-            });
-          });
-
-          Timer(const Duration(seconds: 5), () {
-            if (!_isFrameSendingActive) {
-              _isFrameSendingActive = true;
-              print('[STREAMER] Frame sending force-activated after 5 seconds');
-            }
-          });
-        }
-      });
+      _initializeStream();
+      _setupKeyRotation();
       _listenToStreamStatus();
       _initializeChat();
-      _setupKeyRotation();
+      _startFPSMonitoring();
+      if (!widget.isStreamer) {
+        _preloadViewerKey();
+      }
     } else {
       Navigator.pushReplacementNamed(context, '/login');
     }
+  }
+
+  void _startFPSMonitoring() {
+    final stopwatch = Stopwatch()..start();
+
+    _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      final elapsedSeconds = stopwatch.elapsedMilliseconds / 1000.0;
+
+      if (widget.isStreamer) {
+        _streamerFPS = (_streamerFramesSent / elapsedSeconds);
+        print(
+            '[STREAMER FPS] Frames sent: ${_streamerFPS.toStringAsFixed(1)}/sec');
+        _streamerFramesSent = 0;
+      } else {
+        _viewerFPS = (_viewerFramesReceived / elapsedSeconds);
+        print(
+            '[VIEWER FPS] Frames received: ${_viewerFPS.toStringAsFixed(1)}/sec');
+        _viewerFramesReceived = 0;
+      }
+
+      stopwatch.reset();
+
+      if (mounted) {
+        setState(() {});
+      }
+    });
   }
 
   void _setupKeyRotation() {
@@ -296,7 +279,7 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       final result = await StreamKeyExchangeService.generateSharedSecret(
         streamerId,
         viewerId,
-        true, // isStreamer
+        true,
         streamId: streamId,
       );
 
@@ -312,241 +295,301 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       if (error.contains('public key not found')) {
         await Future.delayed(delay);
       } else {
-        // Non-retryable error
         break;
       }
     }
-
     print(
         '[KEY_EXCHANGE][ERROR] Could not establish shared key for viewer $viewerId after retries');
   }
 
-  Future<void> _setupEncryptedDataChannel(
-      RTCPeerConnection pc, String viewerId, String socketId) async {
-    if (widget.isStreamer && viewerId != null) {
-      // Streamer creating data channel for specific viewer
-      final dataChannelInit = RTCDataChannelInit()
-        ..ordered = true
-        ..protocol = 'video-e2ee'
-        ..negotiated = false;
+  Future<void> _initializeCameraPreview() async {
+    CameraDescription? frontCamera = cameras.firstWhere(
+      (camera) => camera.lensDirection == CameraLensDirection.front,
+      orElse: () => cameras.first,
+    );
 
-      try {
-        final dataChannel =
-            await pc.createDataChannel('video-e2ee', dataChannelInit);
+    _cameraController = CameraController(
+      frontCamera,
+      ResolutionPreset.medium,
+      enableAudio: true,
+    );
+    await _cameraController.initialize();
 
-        print('[STREAMER] Created data channel: ${dataChannel.label}');
-        print(
-            '[STREAMER] Data channel init params: ordered=${dataChannelInit.ordered}, protocol=${dataChannelInit.protocol}');
-
-        dataChannel.onDataChannelState = (state) {
-          print('[STREAMER] Data channel for $viewerId state: $state');
-          if (state == RTCDataChannelState.RTCDataChannelOpen) {
-            _viewerDataChannels[viewerId] = dataChannel;
-            print('[STREAMER] Viewer $viewerId data channel is open');
-          } else if (state == RTCDataChannelState.RTCDataChannelClosed ||
-              state == RTCDataChannelState.RTCDataChannelClosing) {
-            _viewerDataChannels.remove(viewerId);
-            print('[STREAMER] Viewer $viewerId data channel closed');
-          }
-        };
-
-        if (_localStream != null) {
-          for (final track in _localStream!.getTracks()) {
-            await pc.addTrack(track, _localStream!);
-          }
-        }
-
-        final offer = await pc.createOffer({
-          'offerToReceiveAudio': true,
-          'offerToReceiveVideo': true,
-          'iceRestart': true,
-        });
-
-        print('[SIGNALING] Offer sent to $socketId for viewerId: $viewerId');
-
-        await pc.setLocalDescription(offer);
-        await _waitForIceGathering(pc);
-
-        print('[STREAMER] Sending offer to viewer: $viewerId');
-        _signalingService.sendOffer(widget.streamId, socketId, offer);
-      } catch (e) {
-        print('[ERROR] Exception creating DataChannel for $viewerId: $e');
-      }
-      // _viewerDataChannels[viewerId] = dataChannel;
-    } else {
-      print('[VIEWER] Data channel setup handled via onDataChannel callback');
-    }
+    setState(() {
+      _cameraPreviewWidget = CameraPreview(_cameraController);
+    });
   }
 
   Future<void> _initializeStream() async {
     try {
-      await _remoteRenderer.initialize();
+      final userId = FirebaseAuth.instance.currentUser!.uid;
+
+      final response = await http.post(
+        Uri.parse(
+            'https://socket-server-production-23a9.up.railway.app/get-livekit-token'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'identity': userId,
+          'roomName': widget.streamId,
+          'isPublisher': widget.isStreamer,
+        }),
+      );
+
+      if (response.statusCode != 200) {
+        throw Exception(
+            'Failed to fetch LiveKit token (${response.statusCode})');
+      }
+
+      final tokenJson = jsonDecode(response.body);
+      final liveKitToken = tokenJson['token'];
+
+      if (liveKitToken == null || liveKitToken.isEmpty) {
+        throw Exception('Token is missing from server response');
+      }
 
       if (widget.isStreamer) {
-        await _initializeStreamer();
+        await _liveKitService.connectAsStreamer(
+            widget.liveKitUrl, liveKitToken);
+        print('[LIVEKIT] Connected as streamer');
+
+        await _initializeCameraPreview();
+        print('[STREAMER] Camera initialized');
+
+        _liveKitService.room.events.listen((event) {
+          if (event is ParticipantConnectedEvent &&
+              event.participant is RemoteParticipant) {
+            final viewerId = event.participant.identity;
+            print('[STREAMER] New viewer connected: $viewerId');
+
+            _connectedViewers.add(viewerId);
+
+            if (_connectedViewers.length == 1 && !_isFrameSendingActive) {
+              _startEncryptedFrameSender();
+              _isFrameSendingActive = true;
+              print('[STREAMER] Started frame sending for first viewer');
+            }
+
+            tryKeyExchangeWithViewer(
+              streamerId: FirebaseAuth.instance.currentUser!.uid,
+              viewerId: viewerId,
+              streamId: widget.streamId,
+            );
+          }
+        });
       } else {
+        print('[VIEWER] Starting as viewer...');
+
         if (widget.streamerId.isEmpty) {
           throw Exception('Streamer ID is missing or invalid');
         }
 
-        // For viewer, exchange keys with streamer
-        final keyExchange = await StreamKeyExchangeService.generateSharedSecret(
-          FirebaseAuth.instance.currentUser!.uid,
-          widget.streamerId,
-          false,
-          streamId: widget.streamId,
-        );
+        await _liveKitService.connectAsViewer(widget.liveKitUrl, liveKitToken);
+        print('[LIVEKIT] Connected as viewer');
 
-        if (!keyExchange['success']) {
-          throw Exception('Failed to exchange keys: ${keyExchange['error']}');
-        }
+        _liveKitService.onData((Uint8List data, RemoteParticipant participant) {
+          final senderId = participant.identity;
+          print('[VIEWER] Received data from: $senderId, size: ${data.length}');
 
-        if (keyExchange['exchangeId'] == null ||
-            keyExchange['exchangeId'].isEmpty) {
-          print('Error: exchangeId is null or empty');
-          throw Exception('Exchange ID is invalid');
-        }
+          _handleEncryptedFrame(data, senderId);
+        });
 
-        print(
-            'Key exchange successful - Exchange ID: ${keyExchange['exchangeId']}');
-
-        final verification = await StreamKeyExchangeService.verifyKeyExchange(
-          keyExchange['exchangeId'],
-          streamId: widget.streamId,
-        );
-
-        if (verification['verified']) {
-          // print('Exchange verified successfully');
-          // print('Exchange details: ${verification['exchange']}');
-          // print('Exchange logs: ${verification['logs']}');
-        } else {
-          throw Exception('Key exchange verification failed');
-        }
-
-        await _initializeViewer();
+        _performKeyExchange();
       }
 
       setState(() {
         _isLoading = false;
       });
+
+      print('[INIT] Stream initialization completed successfully');
     } catch (e) {
       print('Error in stream initialization: $e');
+      setState(() {
+        _hasError = true;
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _performKeyExchange() async {
+    final userId = FirebaseAuth.instance.currentUser!.uid;
+
+    print('[VIEWER] Starting key exchange with streamer: ${widget.streamerId}');
+
+    bool keyExchangeSuccess = false;
+    int attempts = 0;
+    const maxAttempts = 10;
+
+    while (!keyExchangeSuccess && attempts < maxAttempts && mounted) {
+      attempts++;
+      print('[VIEWER] Key exchange attempt $attempts/$maxAttempts');
+
+      try {
+        final keyExchange = await StreamKeyExchangeService.generateSharedSecret(
+          userId,
+          widget.streamerId,
+          false,
+          streamId: widget.streamId,
+        );
+
+        if (keyExchange['success'] == true) {
+          print('[VIEWER] Key exchange successful');
+          await _preloadViewerKey();
+
+          if (mounted) {
+            setState(() {
+              _isEncryptionReady = true;
+            });
+          }
+          keyExchangeSuccess = true;
+          break;
+        } else {
+          print('[VIEWER] Key exchange failed: ${keyExchange['error']}');
+          await Future.delayed(const Duration(seconds: 2));
+        }
+      } catch (e) {
+        print('[VIEWER] Key exchange error: $e');
+        await Future.delayed(const Duration(seconds: 2));
+      }
+    }
+
+    if (!keyExchangeSuccess && mounted) {
       setState(() {
         _hasError = true;
       });
     }
   }
 
-  Future<bool> _isRepaintBoundaryReady() async {
-    try {
-      await Future.delayed(Duration(milliseconds: 500));
-      final boundary = _previewContainerKey.currentContext?.findRenderObject()
-          as RenderRepaintBoundary?;
-      if (boundary == null) return false;
-
-      // Try to capture a test image
-      final image = await boundary.toImage(pixelRatio: 1.0);
-      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-      return byteData != null;
-    } catch (e) {
-      print('[STREAMER] RepaintBoundary not ready: $e');
-      return false;
-    }
-  }
-
   void _startEncryptedFrameSender() {
+    if (_frameTimer != null) {
+      _frameTimer!.cancel();
+    }
+
     _keyRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       _cachedKeys.clear();
     });
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      Timer.periodic(const Duration(milliseconds: 100), (checkTimer) async {
-        if (await _isRepaintBoundaryReady()) {
-          checkTimer.cancel();
-          print('[STREAMER] RepaintBoundary is ready, starting frame timer');
+    if (_cameraController == null || !_cameraController.value.isInitialized) {
+      print('[STREAMER] Camera is not initialized');
+      return;
+    }
 
-          _frameTimer =
-              Timer.periodic(const Duration(milliseconds: 500), (_) async {
-            try {
-              if (!_isFrameSendingActive) {
-                print('[STREAMER] Frame sending not active, skipping frame');
-                return;
-              }
-
-              final List<String> connectedViewers = [];
-
-              _viewerDataChannels.forEach((viewerId, dataChannel) {
-                final state = dataChannel.state;
-                print('[STREAMER] Viewer $viewerId data channel state: $state');
-                if (state == RTCDataChannelState.RTCDataChannelOpen) {
-                  connectedViewers.add(viewerId);
-                }
-              });
-
-              if (connectedViewers.isEmpty) {
-                print('[STREAMER] No connected viewers found, skipping frame');
-                return;
-              }
-
-              print('[STREAMER] Connected viewers: ${connectedViewers.length}');
-
-              final boundary = _previewContainerKey.currentContext
-                  ?.findRenderObject() as RenderRepaintBoundary?;
-              if (boundary == null) {
-                print('[STREAMER] Boundary is null, skipping frame');
-                return;
-              }
-
-              final image = await boundary.toImage(pixelRatio: 1.0);
-              final byteData =
-                  await image.toByteData(format: ui.ImageByteFormat.png);
-              if (byteData == null || byteData.lengthInBytes == 0) {
-                print('[DEBUG] Captured image is empty or null');
-              }
-
-              final bytes = byteData?.buffer.asUint8List();
-              if (bytes == null) {
-                print('[STREAMER] Failed to get image bytes, skipping frame');
-                return;
-              }
-
-              print('[STREAMER] Captured frame: ${bytes.length} bytes');
-
-              if (!kIsWeb && Platform.isAndroid) {
-                try {
-                  final dir = await getApplicationDocumentsDirectory();
-                  final file = File(
-                      '${dir.path}/debug_frame_${DateTime.now().millisecondsSinceEpoch}.png');
-                  await file.writeAsBytes(bytes);
-                  print(
-                      '[DEBUG] Streamer saved captured frame to: ${file.path}');
-                } catch (e) {
-                  print('[DEBUG] Could not save frame to file: $e');
-                }
-              }
-
-              for (final viewerId in connectedViewers) {
-                await _sendEncryptedFrame(viewerId, bytes);
-              }
-            } catch (e) {
-              print('[STREAMER] Frame encryption/send error: $e');
-            }
-          });
-        } else {
-          print('[STREAMER] Waiting for RepaintBoundary to be ready...');
+    if (!_isImageStreamActive) {
+      _cameraController.startImageStream((CameraImage image) {
+        if (!_isCapturing && _connectedViewers.isNotEmpty) {
+          _convertCameraImageToBytes(image);
         }
       });
+      _isImageStreamActive = true;
+      print('[STREAMER] Image stream started');
+    }
+
+    _frameTimer = Timer.periodic(const Duration(milliseconds: 50), (_) async {
+      if (_connectedViewers.isEmpty ||
+          _isCapturing ||
+          _latestFrameBytes == null) {
+        return;
+      }
+
+      _isCapturing = true;
+      try {
+        print('[STREAMER] Starting frame capture...');
+
+        final frameBytes = _latestFrameBytes!;
+        print('[STREAMER] Using frame: ${frameBytes.length} bytes');
+
+        final compressedBytes = await _compressImageForStreaming(frameBytes);
+        print(
+            '[STREAMER] Compressed frame: ${compressedBytes.length} bytes (original: ${frameBytes.length})');
+
+        for (final viewerId in _connectedViewers) {
+          await _sendEncryptedFrame(viewerId, compressedBytes);
+        }
+
+        _streamerFramesSent++;
+      } catch (e) {
+        print('[STREAMER] Frame encryption/send error: $e');
+      } finally {
+        _isCapturing = false;
+      }
     });
   }
 
-  Future<void> _dumpEncrypted(Uint8List encrypted) async {
-    if (await Permission.storage.request().isDenied) return;
+  Future<void> _convertCameraImageToBytes(CameraImage image) async {
+    try {
+      final bytes = await _cameraImageToBytes(image);
+      _latestFrameBytes = bytes;
+    } catch (e) {
+      print('[STREAMER] Error converting camera image: $e');
+    }
+  }
 
-    final dir = await getDownloadsDirectory();
-    final filePath =
-        '${dir!.path}/cipher_${DateTime.now().millisecondsSinceEpoch}.bin';
-    await File(filePath).writeAsBytes(encrypted, flush: true);
-    print('[E2EE] Cipher dump → $filePath');
+  Future<Uint8List> _cameraImageToBytes(CameraImage image) async {
+    try {
+      if (image.format.group == ImageFormatGroup.yuv420) {
+        return _convertYUV420ToJPEG(image);
+      } else if (image.format.group == ImageFormatGroup.bgra8888) {
+        return _convertBGRA8888ToJPEG(image);
+      } else {
+        throw Exception('Unsupported image format: ${image.format.group}');
+      }
+    } catch (e) {
+      print('[STREAMER] Image conversion error: $e');
+      rethrow;
+    }
+  }
+
+  Future<Uint8List> _convertYUV420ToJPEG(CameraImage image) async {
+    return await compute(
+      isolateConvertYUV420ToJPEG,
+      {'image': image},
+    );
+  }
+
+  Uint8List _convertBGRA8888ToJPEG(CameraImage image) {
+    final img.Image imgImage = img.Image.fromBytes(
+      width: image.width,
+      height: image.height,
+      bytes: image.planes[0].bytes.buffer,
+      format: img.Format.uint8,
+    );
+
+    final rotatedImage = img.copyRotate(imgImage, angle: -90);
+
+    return Uint8List.fromList(img.encodeJpg(rotatedImage, quality: 80));
+  }
+
+  Future<Uint8List> _compressImageForStreaming(Uint8List imageBytes) async {
+    try {
+      final ui.Image image = await decodeImageFromList(imageBytes);
+
+      const maxWidth = 426.0;
+      const maxHeight = 240.0;
+
+      const targetWidth = maxWidth;
+      const targetHeight = maxHeight;
+
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+
+      canvas.drawImageRect(
+        image,
+        Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
+        Rect.fromLTWH(0, 0, targetWidth, targetHeight),
+        Paint()..filterQuality = FilterQuality.medium,
+      );
+
+      final picture = recorder.endRecording();
+      final compressedImage =
+          await picture.toImage(targetWidth.toInt(), targetHeight.toInt());
+
+      final byteData =
+          await compressedImage.toByteData(format: ui.ImageByteFormat.png);
+
+      return byteData!.buffer.asUint8List();
+    } catch (e) {
+      print('[STREAMER] Image compression failed: $e');
+      return imageBytes;
+    }
   }
 
   Future<void> _sendEncryptedFrame(String viewerId, Uint8List bytes) async {
@@ -564,493 +607,104 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         _cachedKeys[viewerId] = aesKey;
       }
 
-      final nonce = StreamCryptoService.generateNonce();
       final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final aad = StreamCryptoService.buildAad(widget.streamId, timestamp);
-      final cipher =
-          StreamCryptoService.createAesGcmCipher(true, aesKey, nonce, aad: aad);
 
-      final sw = Stopwatch()..start();
-      final encrypted = cipher.process(bytes);
-      sw.stop();
-      final encMs = sw.elapsedMicroseconds / 1000.0;
+      final encryptedPayload = await compute(isolateEncryptFrame, {
+        'frameBytes': bytes,
+        'aesKey': aesKey,
+        'streamId': widget.streamId,
+        'timestamp': timestamp,
+      });
 
-      _dumpEncrypted(encrypted);
+      const maxChunkSize = 60000;
 
-      EncryptionLogger.logCryptoTiming(
-        streamId: widget.streamId,
-        operation: 'encrypt',
-        frameSize: bytes.length,
-        durationMs: encMs,
-        success: true,
-      );
-
-      final payload =
-          Uint8List(StreamCryptoService.nonceLength + encrypted.length + 4);
-      payload.setRange(0, StreamCryptoService.nonceLength, nonce);
-      payload.setRange(StreamCryptoService.nonceLength,
-          StreamCryptoService.nonceLength + encrypted.length, encrypted);
-      payload.buffer.asByteData().setUint32(
-          StreamCryptoService.nonceLength + encrypted.length, timestamp);
-
-      final encoded = base64.encode(payload);
-      print('[STREAMER] Frame details for $viewerId:');
-      print('  - Original bytes: ${bytes.length}');
-      print('  - Encrypted bytes: ${encrypted.length}');
-      print('  - Payload bytes: ${payload.length}');
-      print('  - Encoded length: ${encoded.length}');
-      print('  - Data channel state: ${_viewerDataChannels[viewerId]?.state}');
-
-      final dc = _viewerDataChannels[viewerId];
-      if (dc != null && dc.state == RTCDataChannelState.RTCDataChannelOpen) {
-        try {
-          dc.send(RTCDataChannelMessage(encoded));
-          print('[STREAMER] Frame sent successfully to viewer: $viewerId');
-        } catch (sendError) {
-          print('[STREAMER] Error sending frame to $viewerId: $sendError');
+      if (encryptedPayload.length <= maxChunkSize) {
+        final success =
+            await _liveKitService.publishData(encryptedPayload, true);
+        if (success) {
+          print(
+              '[STREAMER] Frame sent to $viewerId: ${encryptedPayload.length} bytes');
         }
       } else {
-        print(
-            '[STREAMER] Data channel not ready for $viewerId. State: ${dc?.state}');
+        final totalChunks = (encryptedPayload.length / maxChunkSize).ceil();
+        final frameId = DateTime.now().millisecondsSinceEpoch;
+
+        for (int i = 0; i < totalChunks; i++) {
+          final start = i * maxChunkSize;
+          final end = math.min(start + maxChunkSize, encryptedPayload.length);
+          final chunk = encryptedPayload.sublist(start, end);
+
+          final chunkPayload = Uint8List(16 + chunk.length);
+          chunkPayload.buffer.asByteData().setUint64(0, frameId);
+          chunkPayload.buffer.asByteData().setUint32(8, i);
+          chunkPayload.buffer.asByteData().setUint32(12, totalChunks);
+          chunkPayload.setRange(16, 16 + chunk.length, chunk);
+
+          final success = await _liveKitService.publishData(chunkPayload, true);
+          if (!success) {
+            print(
+                '[STREAMER] Failed to send chunk $i/$totalChunks to $viewerId');
+            return;
+          }
+        }
       }
     } catch (e) {
-      EncryptionLogger.logCryptoTiming(
-        streamId: widget.streamId,
-        operation: 'encrypt',
-        frameSize: bytes.length,
-        durationMs: 0,
-        success: false,
-        error: e.toString(),
-      );
       print('[STREAMER] Error sending frame to $viewerId: $e');
     }
   }
 
-  Future<void> _initializeStreamer() async {
-    await _localRenderer.initialize();
-
-    _localStream = await navigator.mediaDevices.getUserMedia({
-      'video': {
-        'facingMode': 'user',
-        'width': {'ideal': 1920},
-        'height': {'ideal': 1080},
-      },
-      'audio': true,
-    });
-
-    _localRenderer.srcObject = _localStream;
-    print(
-        '[STREAMER] Local stream tracks: ${_localStream?.getTracks().map((t) => t.kind)}');
-
-    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
-    if (currentUserId == null) throw Exception('Not logged in');
-
-    final encryptionVerified = await StreamCryptoService.verifyEncryption(
-      widget.streamId,
-      currentUserId,
-    );
-    if (!encryptionVerified) {
-      throw Exception('Failed to verify stream encryption');
-    }
-
-    await _setupStreamerConnection();
-  }
-
-  Future<void> _initializeViewer() async {
-    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
-    if (currentUserId == null) throw Exception('Not logged in');
-
-    final encryptionVerified = await StreamCryptoService.verifyEncryption(
-        widget.streamId, widget.streamerId);
-    if (!encryptionVerified) {
-      throw Exception('Failed to verify stream encryption');
-    }
-
-    await _setupViewerConnection();
-  }
-
-  Future<RTCPeerConnection> _createPeerConnection() async {
-    if (_isDisposed) {
-      throw Exception('Cannot create connection after disposal');
-    }
-
-    final configuration = {
-      'iceServers': [
-        {
-          'urls': [
-            'stun:stun.l.google.com:19302',
-            'stun:stun1.l.google.com:19302',
-            'stun:stun2.l.google.com:19302',
-            'stun:stun3.l.google.com:19302',
-            'stun:stun4.l.google.com:19302',
-          ],
-        }
-      ],
-      'sdpSemantics': 'unified-plan',
-      'iceTransportPolicy': 'all',
-      'bundlePolicy': 'max-bundle',
-      'rtcpMuxPolicy': 'require',
-    };
-
-    final conn = await createPeerConnection(configuration);
-    if (conn == null) {
-      throw Exception('Failed to create peer connection');
-    }
-    return conn;
-  }
-
-  Future<RTCPeerConnection?> _initPeerConnection(String viewerId) async {
-    if (_isDisposed) return null;
-
-    print('Creating new peer connection for viewer: $viewerId');
-
+  Future<void> _handleEncryptedFrame(Uint8List payload, String senderId) async {
     try {
-      final configuration = {
-        'iceServers': [
-          {
-            'urls': [
-              'stun:stun.l.google.com:19302',
-              'stun:stun1.l.google.com:19302',
-              'stun:stun2.l.google.com:19302',
-              'stun:stun3.l.google.com:19302',
-              'stun:stun4.l.google.com:19302',
-            ],
-          }
-        ],
-        'sdpSemantics': 'unified-plan',
-        'iceTransportPolicy': 'all',
-        'bundlePolicy': 'max-bundle',
-        'rtcpMuxPolicy': 'require',
-      };
-
-      final peerConnection = await createPeerConnection(configuration);
-      if (peerConnection == null) return null;
-
-      // Set up connection state monitoring
-      peerConnection.onConnectionState = (RTCPeerConnectionState state) {
-        // print('Connection state for $viewerId: $state');
-        if (state ==
-                RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
-            state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
-            state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
-          _cleanupPeerConnection(viewerId);
-        }
-      };
-
-      peerConnection.onSignalingState = (RTCSignalingState state) {
-        print('[SIGNALING] Signaling state for $viewerId: $state');
-      };
-
-      peerConnection.onIceConnectionState = (RTCIceConnectionState state) {
-        print('[ICE] ICE connection state for $viewerId: $state');
-      };
-
-      peerConnection.onIceCandidate = (RTCIceCandidate? candidate) {
-        if (candidate != null &&
-            !_isDisposed &&
-            _connectionStates[viewerId] == true) {
-          _signalingService.sendIceCandidate(
-            widget.streamId,
-            candidate,
-            targetId: viewerId,
-          );
-        }
-      };
-
-      return peerConnection;
-    } catch (e) {
-      print('Error initializing peer connection: $e');
-      return null;
-    }
-  }
-
-  Future<void> _setupStreamerConnection() async {
-    try {
-      _signalingService.connect();
-      _signalingService.joinStream(widget.streamId, true);
-
-      _signalingService.onViewerJoined((data) async {
-        final firebaseUserId = data['firebaseUserId'];
-        final socketId = data['socketId'];
-
-        final currentUserId = FirebaseAuth.instance.currentUser?.uid;
-        if (currentUserId == null || firebaseUserId == null) return;
-        print('Setting up connection for viewer: $firebaseUserId');
-
-        final result = await StreamKeyExchangeService.generateSharedSecret(
-          currentUserId,
-          firebaseUserId,
-          true,
-          streamId: widget.streamId,
-        );
-
-        if (!result['success']) {
-          print(
-              'Failed to generate shared key for viewer $firebaseUserId: ${result['error']}');
-          return;
-        }
-
-        await Future.delayed(const Duration(milliseconds: 500));
-
-        if (_peerConnections.containsKey(firebaseUserId)) {
-          print(
-              '[WARN] Peer connection for $firebaseUserId already exists. Skipping.');
-          return;
-        }
-
-        final peerConnection = await _initPeerConnection(firebaseUserId);
-        if (peerConnection == null) {
-          print(
-              '[ERROR] Failed to initialize peer connection for $firebaseUserId');
-          return;
-        }
-
-        print('Creating new peer connection for viewer: $firebaseUserId');
-        _peerConnections[firebaseUserId] = peerConnection;
-        _connectionStates[firebaseUserId] = true;
-
-        await _setupEncryptedDataChannel(
-            peerConnection, firebaseUserId, socketId);
-      });
-
-      _signalingService.onAnswer((data) async {
-        final viewerId = data['viewerId'];
-        final socketId = data['socketId'];
-        print(
-            '[SIGNALING] Received answer from viewerId: $viewerId, socketId: $socketId');
-
-        if (_isDisposed || _connectionStates[viewerId] != true) return;
-
-        final peerConnection = _peerConnections[viewerId];
-        if (peerConnection == null) return;
-
-        try {
-          if (peerConnection.signalingState !=
-              RTCSignalingState.RTCSignalingStateClosed) {
-            print('[SIGNALING] Received answer from viewerId: $viewerId');
-            print(
-                '[SIGNALING] Current keys in _peerConnections: ${_peerConnections.keys}');
-
-            final answer = RTCSessionDescription(
-              data['answer']['sdp'],
-              data['answer']['type'],
-            );
-            await peerConnection.setRemoteDescription(answer);
-            print('[SIGNALING] Remote description set for viewerId: $viewerId');
-            print(
-                '[SIGNALING] Current ICE connection state: ${peerConnection.iceConnectionState}');
-            print(
-                '[SIGNALING] Current signaling state: ${peerConnection.signalingState}');
-          }
-        } catch (e) {
-          print('Error handling answer from $viewerId: $e');
-          await _cleanupPeerConnection(viewerId);
-        }
-      });
-
-      _signalingService.onIceCandidate((data) async {
-        final viewerId = data['viewerId'];
-        if (_isDisposed || _connectionStates[viewerId] != true) return;
-
-        final peerConnection = _peerConnections[viewerId];
-        if (peerConnection == null) return;
-
-        try {
-          if (peerConnection.signalingState !=
-              RTCSignalingState.RTCSignalingStateClosed) {
-            final candidateData = data['candidate'];
-            final candidate = RTCIceCandidate(
-              candidateData['candidate'],
-              candidateData['sdpMid'],
-              int.parse(candidateData['sdpMLineIndex']?.toString() ?? '0'),
-            );
-            await peerConnection.addCandidate(candidate);
-          }
-        } catch (e) {
-          print('Error handling ICE candidate for $viewerId: $e');
-        }
-      });
-    } catch (e) {
-      print('Error in setupStreamerConnection: $e');
-      rethrow;
-    }
-  }
-
-  Future<void> _waitForIceGathering(RTCPeerConnection peerConnection) async {
-    final completer = Completer<void>();
-
-    if (peerConnection.iceGatheringState ==
-        RTCIceGatheringState.RTCIceGatheringStateComplete) {
-      print('[ICE] Gathering already complete');
-      completer.complete();
-    } else {
-      peerConnection.onIceGatheringState = (state) {
-        print('[ICE] Gathering state changed to: $state');
-        if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
-          peerConnection.onIceGatheringState = null;
-          if (!completer.isCompleted) completer.complete();
-        }
-      };
-      Future.delayed(const Duration(seconds: 10), () {
-        if (!completer.isCompleted) {
-          print('[ICE] Gathering timeout — continuing anyway');
-          peerConnection.onIceGatheringState = null;
-          completer.complete();
-        }
-      });
-    }
-    return completer.future;
-  }
-
-  Future<void> _setupViewerConnection() async {
-    try {
-      String? _streamerSocketId;
-
-      _peerConnection = await _createPeerConnection();
-
-      _signalingService.connect();
-      _signalingService.joinStream(widget.streamId, false);
-
-      _signalingService.onOffer((data) async {
-        if (data['type'] != null && data['sdp'] != null) {
-          try {
-            _streamerSocketId = data['streamerId'];
-            if (_streamerSocketId == null) {
-              print('[ERROR] streamerId missing in offer data');
-              return;
-            }
-
-            print('[VIEWER] Binding onDataChannel callback...');
-
-            _peerConnection?.onDataChannel = (RTCDataChannel channel) {
-              print('[VIEWER] Data channel received: ${channel.label}');
-              if (channel.label == 'video-e2ee') {
-                _encryptedVideoChannel = channel;
-
-                _encryptedVideoChannel?.onDataChannelState = (state) {
-                  print('[VIEWER] Data channel state changed to: $state');
-                  if (state == RTCDataChannelState.RTCDataChannelOpen) {
-                    print(
-                        '[VIEWER] Data channel is open and ready to receive frames');
-                    setState(() {
-                      _isEncryptionReady = true;
-                      print(
-                          '[VIEWER] _isEncryptionReady = $_isEncryptionReady');
-                    });
-                    _preloadViewerKey();
-                  }
-                };
-
-                _encryptedVideoChannel?.onMessage =
-                    (RTCDataChannelMessage message) {
-                  print(
-                      '[VIEWER] Received encrypted frame data: ${message.text.length} characters');
-                  _handleEncryptedFrame(message.text);
-                };
-              }
-            };
-
-            final offer = RTCSessionDescription(data['sdp'], data['type']);
-            print('[VIEWER] Setting remote description...');
-            await _peerConnection?.setRemoteDescription(offer);
-            print('[VIEWER] Remote description set!');
-            _remoteDescriptionSet = true;
-
-            if (_pendingCandidates.isNotEmpty) {
-              for (var candidate in _pendingCandidates) {
-                await _peerConnection?.addCandidate(candidate);
-              }
-              _pendingCandidates.clear();
-            }
-
-            print('[VIEWER] Received offer. Creating and sending answer...');
-            final answer = await _peerConnection?.createAnswer({
-              'offerToReceiveAudio': true,
-              'offerToReceiveVideo': true,
-            });
-
-            if (answer != null) {
-              await _peerConnection?.setLocalDescription(answer);
-              _signalingService.sendAnswer(widget.streamId, answer);
-            }
-          } catch (e) {
-            print('Error handling offer: $e');
-          }
-        }
-      });
-
-      _signalingService.onIceCandidate((data) async {
-        try {
-          if (data['candidate'] != null) {
-            final candidateData = data['candidate'];
-            final candidate = RTCIceCandidate(
-              candidateData['candidate'],
-              candidateData['sdpMid'],
-              candidateData['sdpMLineIndex'],
-            );
-
-            if (_remoteDescriptionSet) {
-              await _peerConnection?.addCandidate(candidate);
-            } else {
-              _pendingCandidates.add(candidate);
-            }
-          }
-        } catch (e) {
-          print('Error handling ICE candidate: $e');
-        }
-      });
-
-      _peerConnection?.onIceCandidate = (candidate) {
-        if (candidate != null && _streamerSocketId != null) {
-          print('Viewer sending ICE candidate: ${candidate.candidate}');
-          _signalingService.sendIceCandidate(
-            widget.streamId,
-            candidate,
-            targetId: _streamerSocketId!,
-          );
-        }
-      };
-
-      _peerConnection?.onTrack = (RTCTrackEvent event) {
-        if (event.streams.isNotEmpty) {
-          setState(() {
-            _remoteStream = event.streams[0];
-            _remoteRenderer.srcObject = _remoteStream;
-            if (event.track.kind == 'video') {
-              _remoteVideoConnected = true;
-            }
-          });
-        }
-      };
-
-      _connectionMonitor = ConnectionMonitor(
-        peerConnection: _peerConnection!,
-        streamId: widget.streamId,
-        onConnectionLost: () {
-          setState(() {
-            _remoteVideoConnected = false;
-          });
-        },
-        onConnectionRestored: () {
-          setState(() {
-            _remoteVideoConnected = true;
-          });
-        },
-      );
-    } catch (e) {
-      print('Error in setupViewerConnection: $e');
-      rethrow;
-    }
-  }
-
-  Future<void> _handleEncryptedFrame(String encodedFrame) async {
-    try {
-      if (encodedFrame.isEmpty) {
-        print('[VIEWER] Received empty frame data');
+      if (payload.length < 16) {
+        await _handleSingleFrame(payload, senderId);
         return;
       }
 
-      final payload = base64.decode(encodedFrame);
+      final frameId = payload.buffer.asByteData().getUint64(0);
+      final chunkIndex = payload.buffer.asByteData().getUint32(8);
+      final totalChunks = payload.buffer.asByteData().getUint32(12);
+      final chunkData = payload.sublist(16);
+
+      if (frameId == 0) {
+        await _handleSingleFrame(payload, senderId);
+        return;
+      }
+
+      print(
+          '[VIEWER] Received chunk $chunkIndex/$totalChunks for frame $frameId');
+
+      _frameChunks.putIfAbsent(frameId, () => {});
+      _frameChunks[frameId]![chunkIndex] = chunkData;
+      _expectedChunks[frameId] = totalChunks;
+
+      if (_frameChunks[frameId]!.length == totalChunks) {
+        final reconstructedBytes = <int>[];
+        for (int i = 0; i < totalChunks; i++) {
+          final chunk = _frameChunks[frameId]![i];
+          if (chunk == null) {
+            print('[VIEWER] Missing chunk $i for frame $frameId');
+            return;
+          }
+          reconstructedBytes.addAll(chunk);
+        }
+
+        try {
+          final frameData = Uint8List.fromList(reconstructedBytes);
+          await _handleSingleFrame(frameData, senderId);
+        } catch (e) {
+          print('[VIEWER] Failed to process frame data: $e');
+        } finally {
+          _frameChunks.remove(frameId);
+          _expectedChunks.remove(frameId);
+        }
+      }
+    } catch (e) {
+      print('[VIEWER] Frame handling error: $e');
+    }
+  }
+
+  Future<void> _handleSingleFrame(Uint8List payload, String senderId) async {
+    try {
       if (payload.length < StreamCryptoService.nonceLength + 4) {
         print('[VIEWER] Payload too short: ${payload.length}');
         return;
@@ -1062,74 +716,52 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       final encrypted =
           payload.sublist(StreamCryptoService.nonceLength, payload.length - 4);
 
-      print(
-          '[VIEWER] Processing frame - nonce: ${nonce.length}, encrypted: ${encrypted.length}, timestamp: $timestamp');
-
-      Uint8List? aesKey = _cachedKeys[widget.streamerId];
+      Uint8List? aesKey = _cachedKeys[senderId];
       if (aesKey == null) {
         aesKey = await StreamKeyExchangeService.getStreamKey(widget.streamId,
-            otherUserId: widget.streamerId);
+            otherUserId: senderId);
         if (aesKey == null) {
-          print('[VIEWER] No AES key available');
+          print('[VIEWER] No AES key available for sender: $senderId');
           return;
         }
-        _cachedKeys[widget.streamerId] = aesKey;
-        print('[VIEWER] AES key retrieved and cached');
+        _cachedKeys[senderId] = aesKey;
       }
 
-      final aad = StreamCryptoService.buildAad(widget.streamId, timestamp);
-      final cipher = StreamCryptoService.createAesGcmCipher(
-          false, aesKey, nonce,
-          aad: aad);
-
-      final sw = Stopwatch()..start();
-      final decrypted = cipher.process(encrypted);
-      sw.stop();
-      final decMs = sw.elapsedMicroseconds / 1000.0;
-
-      EncryptionLogger.logCryptoTiming(
-        streamId: widget.streamId,
-        operation: 'decrypt',
-        frameSize: decrypted.length,
-        durationMs: decMs,
-        success: true,
-      );
+      final decrypted = await compute(_isolateDecryptFrame, {
+        'encrypted': encrypted,
+        'aesKey': aesKey,
+        'nonce': nonce,
+        'streamId': widget.streamId,
+        'timestamp': timestamp,
+      });
 
       print('[VIEWER] Frame decrypted successfully: ${decrypted.length} bytes');
 
-      try {
-        ui.decodeImageFromList(decrypted, (image) async {
-          final recorder = ui.PictureRecorder();
-          final canvas = Canvas(recorder);
-          canvas.drawImage(image, Offset.zero, Paint());
+      _frameQueue.add(decrypted);
+      _viewerFramesReceived++;
 
-          final picture = recorder.endRecording();
-          final img = await picture.toImage(image.width, image.height);
-          final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+      while (_frameQueue.length > 3) {
+        _frameQueue.removeFirst();
+      }
 
-          if (byteData != null && mounted) {
-            setState(() {
-              _currentFrame = byteData.buffer.asUint8List();
-              _remoteVideoConnected = true;
-            });
-            print('[VIEWER] Canvas-drawn frame rendered');
-          }
-        });
-      } catch (e) {
-        print('[DEBUG] PNG decode failed: $e');
+      if (_displayTimer == null && mounted) {
+        _startFrameDisplay();
       }
     } catch (e) {
-      EncryptionLogger.logCryptoTiming(
-        streamId: widget.streamId,
-        operation: 'decrypt',
-        frameSize: 0,
-        durationMs: 0,
-        success: false,
-        error: e.toString(),
-      );
       print('[VIEWER] Frame decryption error: $e');
-      print('[VIEWER] Stack trace: ${StackTrace.current}');
     }
+  }
+
+  void _startFrameDisplay() {
+    _displayTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
+      if (_frameQueue.isNotEmpty && mounted) {
+        final frame = _frameQueue.removeFirst();
+        setState(() {
+          _currentFrame = frame;
+          _remoteVideoConnected = true;
+        });
+      }
+    });
   }
 
   Future<void> _preloadViewerKey() async {
@@ -1144,21 +776,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       }
     } catch (e) {
       print('[VIEWER] Failed to preload key: $e');
-    }
-  }
-
-  Future<void> _cleanupPeerConnection(String viewerId) async {
-    _connectionStates[viewerId] = false;
-    final peerConnection = _peerConnections[viewerId];
-    if (peerConnection != null) {
-      try {
-        await peerConnection.close();
-        await peerConnection.dispose();
-        // print('Cleaned up connection for viewer: $viewerId');
-      } catch (e) {
-        print('Error cleaning up connection for $viewerId: $e');
-      }
-      _peerConnections.remove(viewerId);
     }
   }
 
@@ -1183,6 +800,40 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     } catch (e) {
       print('Error ending stream: $e');
     }
+  }
+
+  @override
+  void dispose() {
+    if (_isImageStreamActive && _cameraController.value.isInitialized) {
+      try {
+        _cameraController.stopImageStream();
+        _isImageStreamActive = false;
+      } catch (e) {
+        print('[STREAMER] Error stopping image stream: $e');
+      }
+    }
+
+    _displayTimer?.cancel();
+    _frameTimer?.cancel();
+    _keyRotationTimer?.cancel();
+    _keyRefreshTimer?.cancel();
+    _fpsTimer?.cancel();
+
+    _frameQueue.clear();
+
+    _cameraController.dispose();
+    _isFrameSendingActive = false;
+    _cachedKeys.clear();
+    if (widget.isStreamer) {
+      _endStream();
+      StreamKeyExchangeService.cleanupStreamKeys(widget.streamId);
+    }
+    _isDisposed = true;
+    _streamStatusSubscription?.cancel();
+    _chatSubscription?.cancel();
+    _chatController.dispose();
+    _chatFocusNode.dispose();
+    super.dispose();
   }
 
   void _initializeChat() {
@@ -1247,40 +898,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         }
       }
     }
-  }
-
-  @override
-  void dispose() {
-    _keyRotationTimer?.cancel();
-    _keyRefreshTimer?.cancel();
-    _isFrameSendingActive = false;
-    _cachedKeys.clear();
-    _encryptedVideoChannel?.close();
-    if (widget.isStreamer) {
-      _endStream();
-      StreamKeyExchangeService.cleanupStreamKeys(widget.streamId);
-    }
-    _isDisposed = true;
-    for (final viewerId in _peerConnections.keys.toList()) {
-      _cleanupPeerConnection(viewerId);
-    }
-    _frameTimer?.cancel();
-    _viewerDataChannels.forEach((_, dc) => dc.close());
-    _viewerDataChannels.clear();
-
-    _signalingService.disconnect();
-    _pendingCandidates.clear();
-    _streamStatusSubscription?.cancel();
-    _localStream?.getTracks().forEach((track) => track.stop());
-    _localStream?.dispose();
-    _localRenderer.dispose();
-    _remoteRenderer.dispose();
-    _peerConnection?.close();
-    _peerConnection?.dispose();
-    _chatSubscription?.cancel();
-    _chatController.dispose();
-    _chatFocusNode.dispose();
-    super.dispose();
   }
 
   Widget _buildChatSection() {
@@ -1404,25 +1021,8 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       );
     }
 
-    // final screenSize = MediaQuery.of(context).size;
-    // final videoHeight = screenSize.height * 0.4;
-
     return Scaffold(
       backgroundColor: const Color(0xFFE5E5E5),
-      // appBar: AppBar(
-      //   backgroundColor: Colors.transparent,
-      //   elevation: 0,
-      //   leading: IconButton(
-      //     icon: const Icon(Icons.arrow_back, color: Colors.black),
-      //     onPressed: () => Navigator.pop(context),
-      //   ),
-      //   actions: [
-      //     IconButton(
-      //       icon: const Icon(Icons.settings, color: Colors.black),
-      //       onPressed: () {},
-      //     ),
-      //   ],
-      // ),
       body: Column(
         children: [
           Stack(
@@ -1434,12 +1034,9 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
                   child: widget.isStreamer
                       ? RepaintBoundary(
                           key: _previewContainerKey,
-                          child: RTCVideoView(
-                            _localRenderer,
-                            objectFit: RTCVideoViewObjectFit
-                                .RTCVideoViewObjectFitCover,
-                            mirror: true,
-                          ),
+                          child: _cameraPreviewWidget ??
+                              const Center(
+                                  child: Text('Initializing camera...')),
                         )
                       : _currentFrame != null
                           ? Container(
@@ -1449,8 +1046,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
                                 _currentFrame!,
                                 fit: BoxFit.contain,
                                 gaplessPlayback: true,
-                                key: ValueKey(
-                                    DateTime.now().millisecondsSinceEpoch),
                                 frameBuilder: (context, child, frame, wasSync) {
                                   if (frame == null) {
                                     return const Center(
@@ -1458,7 +1053,10 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
                                           color: Colors.white),
                                     );
                                   }
-                                  return child;
+                                  return AnimatedSwitcher(
+                                    duration: const Duration(milliseconds: 50),
+                                    child: child,
+                                  );
                                 },
                                 errorBuilder: (context, error, stackTrace) {
                                   return const Center(
@@ -1498,12 +1096,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
                         icon: const Icon(Icons.arrow_back, color: Colors.white),
                         onPressed: () => Navigator.pop(context),
                       ),
-                      // IconButton(
-                      //   icon: const Icon(Icons.fullscreen, color: Colors.white),
-                      //   onPressed: () {
-                      //     //  fullscreen toggle
-                      //   },
-                      // ),
                     ],
                   ),
                 ),

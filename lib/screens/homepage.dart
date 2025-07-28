@@ -103,10 +103,11 @@ class _HomePageState extends State<HomePage> {
         MaterialPageRoute(
           builder: (context) => LiveStreamPage(
             streamTitle: streamInfo['streamTitle'],
-            streamerId: streamInfo['streamerId'],
-            streamerUsername: streamInfo['streamerUsername'],
             streamId: streamId,
             isStreamer: false,
+            streamerId: streamInfo['streamerId'],
+            streamerUsername: streamInfo['streamerUsername'],
+            liveKitUrl: 'wss://livestream-webrtc-bwgufmv6.livekit.cloud',
           ),
         ),
       );

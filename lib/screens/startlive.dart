@@ -6,7 +6,6 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:livestream_webrtc/exchange_service.dart';
 import 'package:livestream_webrtc/screens/livestream.dart';
-import 'package:livestream_webrtc/signaling.dart';
 import 'package:livestream_webrtc/e2ee_service.dart';
 import 'package:livestream_webrtc/logger.dart';
 
@@ -19,7 +18,6 @@ class StartLivePage extends StatefulWidget {
 
 class _StartLivePageState extends State<StartLivePage> {
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
-  final _signalingService = SignalingService();
   final TextEditingController _titleController = TextEditingController();
 
   MediaStream? _localStream;
@@ -147,10 +145,11 @@ class _StartLivePageState extends State<StartLivePage> {
           MaterialPageRoute(
             builder: (context) => LiveStreamPage(
               streamTitle: streamTitle,
-              streamerId: streamerId,
-              streamerUsername: streamerUsername,
               streamId: streamId,
               isStreamer: true,
+              streamerId: streamerId,
+              streamerUsername: streamerUsername,
+              liveKitUrl: 'wss://livestream-webrtc-bwgufmv6.livekit.cloud',
             ),
           ),
         );
@@ -184,7 +183,6 @@ class _StartLivePageState extends State<StartLivePage> {
 
   @override
   void dispose() {
-    _signalingService.disconnect();
     _localStream?.getTracks().forEach((track) => track.stop());
     _localStream?.dispose();
     _localRenderer.dispose();
