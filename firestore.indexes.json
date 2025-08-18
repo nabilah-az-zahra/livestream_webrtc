@@ -1,0 +1,19 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "streams",
+      "queryScope": "COLLECTION",
+      "fields": [
+        {
+          "fieldPath": "isLive",
+          "order": "ASCENDING"
+        },
+        {
+          "fieldPath": "createdAt",
+          "order": "DESCENDING"
+        }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

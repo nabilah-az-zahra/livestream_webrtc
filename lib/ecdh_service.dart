@@ -48,7 +48,7 @@ class EcdhService {
       return _deriveKeyFromPassword(password, userId);
     } catch (e) {
       print('Error getting encryption key: $e');
-      throw e;
+      rethrow;
     }
   }
 
@@ -118,7 +118,6 @@ class EcdhService {
   static Future<Map<String, dynamic>> savePrivateKey(
       String userId, String password, Uint8List privateKeyBytes) async {
     try {
-      // Also save a copy in secure storage
       await secureStorage.write(
         key: 'private_key_$userId',
         value: bytesToString(privateKeyBytes),
@@ -179,7 +178,6 @@ class EcdhService {
         'publicKeyLength': publicKeyBytes.length,
       }, SetOptions(merge: true));
 
-      // Verify the key was saved
       final doc = await FirebaseFirestore.instance
           .collection('user_keys')
           .doc(userId)

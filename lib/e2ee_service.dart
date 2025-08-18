@@ -19,9 +19,15 @@ class StreamCryptoService {
   };
 
   static Uint8List buildAad(String streamId, int timestamp) {
-    final streamBytes = utf8.encode(streamId);
-    final tsBytes = ByteData(4)..setUint32(0, timestamp & 0xFFFFFFFF);
-    return Uint8List.fromList(streamBytes + tsBytes.buffer.asUint8List());
+    final combined = '$streamId:$timestamp';
+    final aadBytes = utf8.encode(combined);
+
+    print('[DEBUG] Dart streamId: $streamId');
+    print('[DEBUG] Dart timestamp: $timestamp');
+    print('[DEBUG] Dart AAD string: $combined');
+    print('[DEBUG] Dart AAD bytes: $aadBytes');
+
+    return Uint8List.fromList(aadBytes);
   }
 
   static GCMBlockCipher createAesGcmCipher(
@@ -113,10 +119,6 @@ class StreamCryptoService {
       final decryptCipher =
           createAesGcmCipher(false, aesKey, nonce, aad: testAad);
       final decrypted = decryptCipher.process(encrypted);
-      if (decryptCipher == null) {
-        print('Verification failed: Could not create decryption cipher');
-        return false;
-      }
 
       if (!listEquals(testData, decrypted)) {
         print('Verification failed: Data mismatch after decryption');

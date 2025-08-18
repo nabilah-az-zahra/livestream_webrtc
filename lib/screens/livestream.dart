@@ -1,28 +1,22 @@
 import 'dart:async';
-import 'dart:collection';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:math';
-import 'dart:math' as math;
-import 'dart:typed_data';
-import 'dart:ui' as ui;
+// import 'dart:math' as math;
+// import 'dart:ui' as ui;
 import 'package:camera/camera.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
-import 'package:image/image.dart' as img;
+// import 'package:image/image.dart' as img;
 import 'package:livekit_client/livekit_client.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:livestream_webrtc/main.dart';
 import 'package:livestream_webrtc/livekit_service.dart';
 import 'package:livestream_webrtc/exchange_service.dart';
 import 'package:livestream_webrtc/e2ee_service.dart';
-import 'package:livestream_webrtc/logger.dart';
+import 'package:livestream_webrtc/native_video_plugin.dart';
 
 class LiveStreamPage extends StatefulWidget {
   final String streamTitle;
@@ -83,77 +77,182 @@ class ChatMessage {
   }
 }
 
-Uint8List isolateConvertYUV420ToJPEG(Map<String, dynamic> params) {
-  final CameraImage image = params['image'];
-  final int width = image.width;
-  final int height = image.height;
+class LatencyTracker {
+  final Map<int, int> _frameCaptureTimestamps = {};
+  final Map<int, int> _frameRenderTimestamps = {};
+  final List<double> _latencySamples = [];
 
-  final int uvRowStride = image.planes[1].bytesPerRow;
-  final int uvPixelStride = image.planes[1].bytesPerPixel!;
+  Timer? _cleanupTimer;
+  Timer? _statsTimer;
 
-  final img.Image imgImage = img.Image(width: width, height: height);
+  void start() {
+    _cleanupTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _cleanup();
+    });
 
-  for (int y = 0; y < height; y++) {
-    for (int x = 0; x < width; x++) {
-      final int yIndex = y * image.planes[0].bytesPerRow + x;
-      final int uvIndex = (y ~/ 2) * uvRowStride + (x ~/ 2) * uvPixelStride;
+    _statsTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      _printCurrentStats();
+    });
 
-      final int yValue = image.planes[0].bytes[yIndex];
-      final int uValue = image.planes[1].bytes[uvIndex];
-      final int vValue = image.planes[2].bytes[uvIndex];
+    print('[LATENCY_TRACKER] Started with cleanup and stats timers');
+  }
 
-      final int r = (yValue + 1.402 * (vValue - 128)).round().clamp(0, 255);
-      final int g =
-          (yValue - 0.344136 * (uValue - 128) - 0.714136 * (vValue - 128))
-              .round()
-              .clamp(0, 255);
-      final int b = (yValue + 1.772 * (uValue - 128)).round().clamp(0, 255);
+  void stop() {
+    _cleanupTimer?.cancel();
+    _statsTimer?.cancel();
+    _frameCaptureTimestamps.clear();
+    _frameRenderTimestamps.clear();
+    print('[LATENCY_TRACKER] Stopped and cleaned up');
+  }
 
-      imgImage.setPixelRgba(x, y, r, g, b, 255);
+  void recordFrameCaptured(int frameId) {
+    final captureTime = DateTime.now().millisecondsSinceEpoch;
+    _frameCaptureTimestamps[frameId] = captureTime;
+    print(
+        '[LATENCY_TRACKER] DART: Frame captured with ID=$frameId at timestamp=$captureTime');
+  }
+
+  void recordFrameRendered(int frameId) {
+    final renderTime = DateTime.now().millisecondsSinceEpoch;
+    _frameRenderTimestamps[frameId] = renderTime;
+
+    final captureTime = _frameCaptureTimestamps[frameId];
+    if (captureTime != null) {
+      final latency = (renderTime - captureTime).toDouble();
+      if (latency > 0 && latency < 10000) {
+        _latencySamples.add(latency);
+        print(
+            '[LATENCY_TRACKER] DART: E2E Latency for frame $frameId: ${latency.toStringAsFixed(2)}ms');
+        print(
+            '[LATENCY_TRACKER] Capture: $captureTime, Render: $renderTime, Latency: ${latency.toStringAsFixed(2)}ms');
+
+        if (_latencySamples.length > 100) {
+          _latencySamples.removeAt(0);
+        }
+      } else {
+        print(
+            '[LATENCY_TRACKER] Invalid latency for frame $frameId: ${latency}ms');
+      }
+    } else {
+      print('[LATENCY_TRACKER] No capture timestamp for frame $frameId');
+      print(
+          '[LATENCY_TRACKER] Available capture frames: ${_frameCaptureTimestamps.keys.take(5).toList()}');
     }
   }
 
-  final rotatedImage = img.copyRotate(imgImage, angle: -90);
-  return Uint8List.fromList(img.encodeJpg(rotatedImage, quality: 80));
+  void _cleanup() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    const maxAge = 60000;
+
+    final captureCountBefore = _frameCaptureTimestamps.length;
+    final renderCountBefore = _frameRenderTimestamps.length;
+
+    _frameCaptureTimestamps
+        .removeWhere((_, timestamp) => now - timestamp > maxAge);
+    _frameRenderTimestamps
+        .removeWhere((_, timestamp) => now - timestamp > maxAge);
+
+    final captureCountAfter = _frameCaptureTimestamps.length;
+    final renderCountAfter = _frameRenderTimestamps.length;
+
+    print(
+        '[LATENCY_TRACKER] Cleanup: Capture $captureCountBeforeâ†’$captureCountAfter, Render $renderCountBeforeâ†’$renderCountAfter');
+  }
+
+  void _printCurrentStats() {
+    if (_latencySamples.isEmpty) {
+      print(
+          '[LATENCY_TRACKER] No latency samples yet. Captures: ${_frameCaptureTimestamps.length}, Renders: ${_frameRenderTimestamps.length}');
+      return;
+    }
+
+    final sortedSamples = List<double>.from(_latencySamples)..sort();
+    final avg = sortedSamples.reduce((a, b) => a + b) / sortedSamples.length;
+    final median = sortedSamples[sortedSamples.length ~/ 2];
+    final p95 = sortedSamples[(sortedSamples.length * 0.95).toInt()];
+
+    print('\n [DART REALTIME LATENCY STATS] Samples: ${sortedSamples.length}');
+    print('   Average: ${avg.toStringAsFixed(2)}ms');
+    print('   Median: ${median.toStringAsFixed(2)}ms');
+    print('   95th percentile: ${p95.toStringAsFixed(2)}ms');
+    print('   Captures tracked: ${_frameCaptureTimestamps.length}');
+    print('   Renders tracked: ${_frameRenderTimestamps.length}\n');
+  }
+
+  Map<String, double> getCurrentStats() {
+    if (_latencySamples.isEmpty) return {};
+
+    final sortedSamples = List<double>.from(_latencySamples)..sort();
+    return {
+      'samples': sortedSamples.length.toDouble(),
+      'average': sortedSamples.reduce((a, b) => a + b) / sortedSamples.length,
+      'median': sortedSamples[sortedSamples.length ~/ 2],
+      'min': sortedSamples.first,
+      'max': sortedSamples.last,
+      'p95': sortedSamples[(sortedSamples.length * 0.95).toInt()],
+      'p99': sortedSamples[(sortedSamples.length * 0.99).toInt()],
+    };
+  }
 }
 
-Future<Uint8List> isolateEncryptFrame(Map<String, dynamic> params) async {
-  final Uint8List frameBytes = params['frameBytes'];
-  final Uint8List aesKey = params['aesKey'];
-  final String streamId = params['streamId'];
-  final int timestamp = params['timestamp'];
+class FrameBuffer {
+  Uint8List? _latestFrame;
+  int _latestFrameId = 0;
+  bool _isProcessing = false;
 
-  final nonce = StreamCryptoService.generateNonce();
-  final aad = StreamCryptoService.buildAad(streamId, timestamp);
-  final cipher =
-      StreamCryptoService.createAesGcmCipher(true, aesKey, nonce, aad: aad);
+  void updateFrame(Uint8List frame, int frameId) {
+    // Always keep only the LATEST frame
+    if (frameId > _latestFrameId && !_isProcessing) {
+      _latestFrame = frame;
+      _latestFrameId = frameId;
+    }
+  }
 
-  final encrypted = cipher.process(frameBytes);
+  Uint8List? consumeLatestFrame() {
+    if (_latestFrame != null) {
+      _isProcessing = true;
+      final frame = _latestFrame;
+      _latestFrame = null; // Clear after consuming
+      return frame;
+    }
+    return null;
+  }
 
-  final payload =
-      Uint8List(StreamCryptoService.nonceLength + encrypted.length + 4);
-  payload.setRange(0, StreamCryptoService.nonceLength, nonce);
-  payload.setRange(StreamCryptoService.nonceLength,
-      StreamCryptoService.nonceLength + encrypted.length, encrypted);
-  payload.buffer
-      .asByteData()
-      .setUint32(StreamCryptoService.nonceLength + encrypted.length, timestamp);
-
-  return payload;
+  void setProcessingComplete() {
+    _isProcessing = false;
+  }
 }
 
 Future<Uint8List> _isolateDecryptFrame(Map<String, dynamic> params) async {
-  final Uint8List encrypted = params['encrypted'];
-  final Uint8List aesKey = params['aesKey'];
-  final Uint8List nonce = params['nonce'];
-  final String streamId = params['streamId'];
-  final int timestamp = params['timestamp'];
+  try {
+    final Uint8List encrypted = params['encrypted'];
+    final Uint8List aesKey = params['aesKey'];
+    final Uint8List nonce = params['nonce'];
+    final String streamId = params['streamId'];
+    final int timestamp = params['timestamp'];
 
-  final aad = StreamCryptoService.buildAad(streamId, timestamp);
-  final cipher =
-      StreamCryptoService.createAesGcmCipher(false, aesKey, nonce, aad: aad);
+    print('[ISOLATE_DECRYPT] Starting Dart decryption...');
+    print('[ISOLATE_DECRYPT] Parameters:');
+    print('  - encrypted.length: ${encrypted.length}');
+    print('  - aesKey.length: ${aesKey.length}');
+    print('  - nonce.length: ${nonce.length}');
+    print('  - streamId: $streamId');
+    print('  - timestamp: $timestamp');
 
-  return cipher.process(encrypted);
+    final aad = StreamCryptoService.buildAad(streamId, timestamp);
+    print('[ISOLATE_DECRYPT] AAD: ${utf8.decode(aad)}');
+
+    final cipher =
+        StreamCryptoService.createAesGcmCipher(false, aesKey, nonce, aad: aad);
+    final decrypted = cipher.process(encrypted);
+
+    print('[ISOLATE_DECRYPT] Decryption successful: ${decrypted.length} bytes');
+    return decrypted;
+  } catch (e, stackTrace) {
+    print('[ISOLATE_DECRYPT] Decryption failed: $e');
+    print('[ISOLATE_DECRYPT] Stack trace: $stackTrace');
+    rethrow;
+  }
 }
 
 class _LiveStreamPageState extends State<LiveStreamPage> {
@@ -166,33 +265,41 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
   late CameraController _cameraController;
   Widget? _cameraPreviewWidget;
 
-  Timer? _frameTimer;
   Timer? _keyRotationTimer;
-  Timer? _keyRefreshTimer;
   Timer? _fpsTimer;
   Uint8List? _currentFrame;
 
   bool _isImageStreamActive = false;
-  Uint8List? _latestFrameBytes;
 
-  bool _isStreamingActive = false;
-  final Queue<Uint8List> _frameQueue = Queue<Uint8List>();
-  Timer? _displayTimer;
+  bool _useNativePipeline = true;
+  bool _nativePipelineActive = false;
+  double _nativeFPS = 0.0;
+  Timer? _nativeStatsTimer;
 
-  int _streamerFramesSent = 0;
   int _viewerFramesReceived = 0;
-  double _streamerFPS = 0.0;
   double _viewerFPS = 0.0;
-  DateTime _lastFpsUpdate = DateTime.now();
+
+  Timer? _audioDelayTimer;
+  bool _audioPublished = false;
+  LocalAudioTrack? _pendingAudioTrack;
+
+  final LatencyTracker _latencyTracker = LatencyTracker();
+  bool _latencyTestEnabled = true;
+  Timer? _latencyStatsTimer;
+  Map<String, double> _currentLatencyStats = {};
+
+  final FrameBuffer _frameBuffer = FrameBuffer();
+  Timer? _renderTimer;
+
+  bool _entropyTestEnabled = false;
+  Timer? _entropyTestTimer;
+  Map<String, dynamic> _entropyStats = {};
 
   bool _isLoading = true;
   bool _hasError = false;
   bool _remoteVideoConnected = false;
   bool _isDisposed = false;
-  bool _remoteDescriptionSet = false;
   bool _isEncryptionReady = false;
-  bool _isFrameSendingActive = false;
-  bool _isCapturing = false;
 
   StreamSubscription? _streamStatusSubscription;
   StreamSubscription? _chatSubscription;
@@ -207,39 +314,105 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
   @override
   void initState() {
     super.initState();
+    _useNativePipeline = true;
+
     if (FirebaseAuth.instance.currentUser != null) {
       _initializeStream();
       _setupKeyRotation();
       _listenToStreamStatus();
       _initializeChat();
       _startFPSMonitoring();
+
+      if (_latencyTestEnabled) {
+        _initializeLatencyTesting();
+      }
+
       if (!widget.isStreamer) {
         _preloadViewerKey();
+      }
+
+      if (NativeVideoPlugin.isAvailable) {
+        _initializeNativePipeline();
+      } else {
+        setState(() {
+          _hasError = true;
+        });
       }
     } else {
       Navigator.pushReplacementNamed(context, '/login');
     }
   }
 
-  void _startFPSMonitoring() {
-    final stopwatch = Stopwatch()..start();
+  void _initializeLatencyTesting() {
+    print('[LATENCY_TEST] Initializing end-to-end latency testing...');
 
-    _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      final elapsedSeconds = stopwatch.elapsedMilliseconds / 1000.0;
+    _latencyTracker.start();
 
-      if (widget.isStreamer) {
-        _streamerFPS = (_streamerFramesSent / elapsedSeconds);
-        print(
-            '[STREAMER FPS] Frames sent: ${_streamerFPS.toStringAsFixed(1)}/sec');
-        _streamerFramesSent = 0;
-      } else {
-        _viewerFPS = (_viewerFramesReceived / elapsedSeconds);
-        print(
-            '[VIEWER FPS] Frames received: ${_viewerFPS.toStringAsFixed(1)}/sec');
-        _viewerFramesReceived = 0;
+    _latencyStatsTimer = Timer.periodic(const Duration(seconds: 15), (_) async {
+      final nativeStats = await NativeVideoPlugin.getLatencyStats();
+      final dartStats = _latencyTracker.getCurrentStats();
+
+      setState(() {
+        _currentLatencyStats = dartStats;
+      });
+
+      if (nativeStats != null && nativeStats.isNotEmpty) {
+        print('\n [NATIVE LATENCY STATS]');
+        NativeVideoPlugin.printLatencyStats(nativeStats);
       }
 
-      stopwatch.reset();
+      if (dartStats.isNotEmpty) {
+        print('\n [DART LATENCY STATS]');
+        print('Samples: ${dartStats['samples']?.toInt()}');
+        print('Average: ${dartStats['average']?.toStringAsFixed(2)}ms');
+        print('Median: ${dartStats['median']?.toStringAsFixed(2)}ms');
+        print('95th percentile: ${dartStats['p95']?.toStringAsFixed(2)}ms');
+      }
+    });
+
+    print('[LATENCY_TEST] Latency testing initialized');
+  }
+
+  Future<void> _initializeNativePipeline() async {
+    try {
+      print('[NATIVE_PIPELINE] Initializing native video pipeline...');
+      print('[NATIVE_PIPELINE] Setting up callbacks...');
+
+      NativeVideoPlugin.onEncryptedFrame((data, viewerId, {frameId}) {
+        print(
+            '[NATIVE_HANDLER] RECEIVED encrypted frame for $viewerId: ${data.length} bytes');
+        _handleNativeEncryptedFrame(data, viewerId);
+      });
+
+      NativeVideoPlugin.onFpsUpdate((fps) {
+        print('[NATIVE_HANDLER] FPS update: $fps');
+        if (mounted) {
+          setState(() {
+            _nativeFPS = fps.toDouble();
+          });
+        }
+      });
+
+      await NativeVideoPlugin.setTargetFPS(30);
+
+      print('[NATIVE_PIPELINE] Native pipeline initialized successfully');
+    } catch (e) {
+      print('[NATIVE_PIPELINE] Failed to initialize: $e');
+      _useNativePipeline = false;
+    }
+  }
+
+  void _startFPSMonitoring() {
+    _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (widget.isStreamer) {
+        print(
+            '[NATIVE_FPS] Native pipeline: ${_nativeFPS.toStringAsFixed(1)}/sec');
+      } else {
+        _viewerFPS = (_viewerFramesReceived / 1.0);
+        print(
+            '[VIEWER_FPS] Frames received: ${_viewerFPS.toStringAsFixed(1)}/sec');
+        _viewerFramesReceived = 0;
+      }
 
       if (mounted) {
         setState(() {});
@@ -355,25 +528,36 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         await _initializeCameraPreview();
         print('[STREAMER] Camera initialized');
 
+        _pendingAudioTrack = await LocalAudioTrack.create();
+        print('[AUDIO_SYNC] Audio track created, will publish with delay');
+
         _liveKitService.room.events.listen((event) {
-          if (event is ParticipantConnectedEvent &&
-              event.participant is RemoteParticipant) {
+          if (event is ParticipantConnectedEvent) {
             final viewerId = event.participant.identity;
             print('[STREAMER] New viewer connected: $viewerId');
 
             _connectedViewers.add(viewerId);
+            _onViewerConnected(viewerId);
 
-            if (_connectedViewers.length == 1 && !_isFrameSendingActive) {
-              _startEncryptedFrameSender();
-              _isFrameSendingActive = true;
-              print('[STREAMER] Started frame sending for first viewer');
+            if (_connectedViewers.length == 1 && !_audioPublished) {
+              _startAudioWithDelay();
             }
 
-            tryKeyExchangeWithViewer(
-              streamerId: FirebaseAuth.instance.currentUser!.uid,
-              viewerId: viewerId,
-              streamId: widget.streamId,
-            );
+            if (_connectedViewers.length == 1 && _useNativePipeline) {
+              _startNativePipeline();
+            }
+          }
+
+          if (event is ParticipantDisconnectedEvent) {
+            final viewerId = event.participant.identity;
+            print('[STREAMER] Viewer disconnected: $viewerId');
+
+            _connectedViewers.remove(viewerId);
+            _onViewerDisconnected(viewerId);
+
+            if (_connectedViewers.isEmpty && _nativePipelineActive) {
+              _stopNativePipeline();
+            }
           }
         });
       } else {
@@ -389,7 +573,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         _liveKitService.onData((Uint8List data, RemoteParticipant participant) {
           final senderId = participant.identity;
           print('[VIEWER] Received data from: $senderId, size: ${data.length}');
-
           _handleEncryptedFrame(data, senderId);
         });
 
@@ -408,6 +591,148 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         _isLoading = false;
       });
     }
+  }
+
+  void _startAudioWithDelay() {
+    if (_audioPublished || _pendingAudioTrack == null) return;
+
+    _audioDelayTimer = Timer(const Duration(milliseconds: 300), () async {
+      try {
+        await _liveKitService.localParticipant
+            ?.publishAudioTrack(_pendingAudioTrack!);
+        _audioPublished = true;
+        print('[AUDIO_SYNC] Audio published successfully with delay');
+      } catch (e) {
+        print('[AUDIO_SYNC] Error publishing delayed audio: $e');
+      }
+    });
+  }
+
+  Future<void> _onViewerConnected(String viewerId) async {
+    try {
+      print('[STREAMER] Processing viewer connection: $viewerId');
+
+      await tryKeyExchangeWithViewer(
+        streamerId: FirebaseAuth.instance.currentUser!.uid,
+        viewerId: viewerId,
+        streamId: widget.streamId,
+      );
+
+      final aesKey = await StreamKeyExchangeService.getStreamKey(
+        widget.streamId,
+        otherUserId: viewerId,
+      );
+
+      if (aesKey != null) {
+        print('[NATIVE_PIPELINE] Adding viewer $viewerId with AES key');
+        final success = await NativeVideoPlugin.addViewer(
+          viewerId: viewerId,
+          aesKey: aesKey,
+        );
+        print('[NATIVE_PIPELINE] Add viewer result: $success');
+
+        if (success) {
+          print('[NATIVE_PIPELINE] Added viewer with key: $viewerId');
+          if (_connectedViewers.length == 1) {
+            _startNativePipeline();
+          }
+        } else {
+          print('[NATIVE_PIPELINE] Failed to add viewer: $viewerId');
+        }
+      } else {
+        print('[NATIVE_PIPELINE] No AES key available for viewer: $viewerId');
+      }
+    } catch (e) {
+      print('[STREAMER] Error handling viewer connection: $e');
+    }
+  }
+
+  Future<void> _onViewerDisconnected(String viewerId) async {
+    if (_useNativePipeline) {
+      await NativeVideoPlugin.removeViewer(viewerId);
+      print('[NATIVE_PIPELINE] Removed viewer: $viewerId');
+    }
+  }
+
+  Future<void> _startNativePipeline() async {
+    if (!NativeVideoPlugin.isAvailable) {
+      print('[NATIVE_PIPELINE] Native pipeline not available');
+      setState(() {
+        _hasError = true;
+      });
+      return;
+    }
+
+    try {
+      print('[NATIVE_PIPELINE] Starting native video pipeline...');
+
+      final success = await NativeVideoPlugin.startVideoStream(
+        streamId: widget.streamId,
+        viewers: _connectedViewers.toList(),
+      );
+
+      if (success && _cameraController.value.isInitialized) {
+        _nativePipelineActive = true;
+
+        if (!_isImageStreamActive) {
+          print('[NATIVE_PIPELINE] Starting camera image stream...');
+
+          _cameraController.startImageStream((CameraImage image) {
+            if (_nativePipelineActive) {
+              final frameId = DateTime.now().microsecondsSinceEpoch;
+              if (_latencyTestEnabled) {
+                _latencyTracker.recordFrameCaptured(frameId);
+                print('[LATENCY_TEST] Dart: Frame captured $frameId');
+              }
+
+              NativeVideoPlugin.processFrame(image).catchError((error) {
+                print('[NATIVE_PIPELINE] Frame processing error: $error');
+              });
+            }
+          });
+          _isImageStreamActive = true;
+        }
+      } else {
+        throw Exception('Failed to start native video stream');
+      }
+    } catch (e) {
+      print('[NATIVE_PIPELINE] Critical error: $e');
+      setState(() {
+        _hasError = true;
+      });
+    }
+  }
+
+  Future<void> _stopNativePipeline() async {
+    if (!_nativePipelineActive) return;
+
+    try {
+      print('[NATIVE_PIPELINE] Stopping native video pipeline...');
+
+      await NativeVideoPlugin.stopVideoStream();
+      _nativePipelineActive = false;
+
+      if (_isImageStreamActive && _cameraController.value.isInitialized) {
+        try {
+          _cameraController.stopImageStream();
+          _isImageStreamActive = false;
+        } catch (e) {
+          print('[NATIVE_PIPELINE] Error stopping image stream: $e');
+        }
+      }
+
+      print('[NATIVE_PIPELINE] Native pipeline stopped');
+    } catch (e) {
+      print('[NATIVE_PIPELINE] Error stopping native pipeline: $e');
+    }
+  }
+
+  void _handleNativeEncryptedFrame(Uint8List data, String viewerId) {
+    // Direct call, no timing overhead
+    _liveKitService.publishVideoFrameImmediate(data,
+        destinationIdentities: [viewerId]).catchError((error) {
+      print('[FRAME_ERROR] Failed to send frame: $error');
+    });
   }
 
   void _performKeyExchange() async {
@@ -459,267 +784,115 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     }
   }
 
-  void _startEncryptedFrameSender() {
-    if (_frameTimer != null) {
-      _frameTimer!.cancel();
-    }
-
-    _keyRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      _cachedKeys.clear();
-    });
-
-    if (_cameraController == null || !_cameraController.value.isInitialized) {
-      print('[STREAMER] Camera is not initialized');
-      return;
-    }
-
-    if (!_isImageStreamActive) {
-      _cameraController.startImageStream((CameraImage image) {
-        if (!_isCapturing && _connectedViewers.isNotEmpty) {
-          _convertCameraImageToBytes(image);
-        }
-      });
-      _isImageStreamActive = true;
-      print('[STREAMER] Image stream started');
-    }
-
-    _frameTimer = Timer.periodic(const Duration(milliseconds: 50), (_) async {
-      if (_connectedViewers.isEmpty ||
-          _isCapturing ||
-          _latestFrameBytes == null) {
-        return;
-      }
-
-      _isCapturing = true;
-      try {
-        print('[STREAMER] Starting frame capture...');
-
-        final frameBytes = _latestFrameBytes!;
-        print('[STREAMER] Using frame: ${frameBytes.length} bytes');
-
-        final compressedBytes = await _compressImageForStreaming(frameBytes);
-        print(
-            '[STREAMER] Compressed frame: ${compressedBytes.length} bytes (original: ${frameBytes.length})');
-
-        for (final viewerId in _connectedViewers) {
-          await _sendEncryptedFrame(viewerId, compressedBytes);
-        }
-
-        _streamerFramesSent++;
-      } catch (e) {
-        print('[STREAMER] Frame encryption/send error: $e');
-      } finally {
-        _isCapturing = false;
-      }
-    });
-  }
-
-  Future<void> _convertCameraImageToBytes(CameraImage image) async {
-    try {
-      final bytes = await _cameraImageToBytes(image);
-      _latestFrameBytes = bytes;
-    } catch (e) {
-      print('[STREAMER] Error converting camera image: $e');
-    }
-  }
-
-  Future<Uint8List> _cameraImageToBytes(CameraImage image) async {
-    try {
-      if (image.format.group == ImageFormatGroup.yuv420) {
-        return _convertYUV420ToJPEG(image);
-      } else if (image.format.group == ImageFormatGroup.bgra8888) {
-        return _convertBGRA8888ToJPEG(image);
-      } else {
-        throw Exception('Unsupported image format: ${image.format.group}');
-      }
-    } catch (e) {
-      print('[STREAMER] Image conversion error: $e');
-      rethrow;
-    }
-  }
-
-  Future<Uint8List> _convertYUV420ToJPEG(CameraImage image) async {
-    return await compute(
-      isolateConvertYUV420ToJPEG,
-      {'image': image},
-    );
-  }
-
-  Uint8List _convertBGRA8888ToJPEG(CameraImage image) {
-    final img.Image imgImage = img.Image.fromBytes(
-      width: image.width,
-      height: image.height,
-      bytes: image.planes[0].bytes.buffer,
-      format: img.Format.uint8,
-    );
-
-    final rotatedImage = img.copyRotate(imgImage, angle: -90);
-
-    return Uint8List.fromList(img.encodeJpg(rotatedImage, quality: 80));
-  }
-
-  Future<Uint8List> _compressImageForStreaming(Uint8List imageBytes) async {
-    try {
-      final ui.Image image = await decodeImageFromList(imageBytes);
-
-      const maxWidth = 426.0;
-      const maxHeight = 240.0;
-
-      const targetWidth = maxWidth;
-      const targetHeight = maxHeight;
-
-      final recorder = ui.PictureRecorder();
-      final canvas = Canvas(recorder);
-
-      canvas.drawImageRect(
-        image,
-        Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble()),
-        Rect.fromLTWH(0, 0, targetWidth, targetHeight),
-        Paint()..filterQuality = FilterQuality.medium,
-      );
-
-      final picture = recorder.endRecording();
-      final compressedImage =
-          await picture.toImage(targetWidth.toInt(), targetHeight.toInt());
-
-      final byteData =
-          await compressedImage.toByteData(format: ui.ImageByteFormat.png);
-
-      return byteData!.buffer.asUint8List();
-    } catch (e) {
-      print('[STREAMER] Image compression failed: $e');
-      return imageBytes;
-    }
-  }
-
-  Future<void> _sendEncryptedFrame(String viewerId, Uint8List bytes) async {
-    try {
-      Uint8List? aesKey = _cachedKeys[viewerId];
-      if (aesKey == null) {
-        aesKey = await StreamKeyExchangeService.getStreamKey(
-          widget.streamId,
-          otherUserId: viewerId,
-        );
-        if (aesKey == null) {
-          print('[STREAMER] No AES key available for viewer: $viewerId');
-          return;
-        }
-        _cachedKeys[viewerId] = aesKey;
-      }
-
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-
-      final encryptedPayload = await compute(isolateEncryptFrame, {
-        'frameBytes': bytes,
-        'aesKey': aesKey,
-        'streamId': widget.streamId,
-        'timestamp': timestamp,
-      });
-
-      const maxChunkSize = 60000;
-
-      if (encryptedPayload.length <= maxChunkSize) {
-        final success =
-            await _liveKitService.publishData(encryptedPayload, true);
-        if (success) {
-          print(
-              '[STREAMER] Frame sent to $viewerId: ${encryptedPayload.length} bytes');
-        }
-      } else {
-        final totalChunks = (encryptedPayload.length / maxChunkSize).ceil();
-        final frameId = DateTime.now().millisecondsSinceEpoch;
-
-        for (int i = 0; i < totalChunks; i++) {
-          final start = i * maxChunkSize;
-          final end = math.min(start + maxChunkSize, encryptedPayload.length);
-          final chunk = encryptedPayload.sublist(start, end);
-
-          final chunkPayload = Uint8List(16 + chunk.length);
-          chunkPayload.buffer.asByteData().setUint64(0, frameId);
-          chunkPayload.buffer.asByteData().setUint32(8, i);
-          chunkPayload.buffer.asByteData().setUint32(12, totalChunks);
-          chunkPayload.setRange(16, 16 + chunk.length, chunk);
-
-          final success = await _liveKitService.publishData(chunkPayload, true);
-          if (!success) {
-            print(
-                '[STREAMER] Failed to send chunk $i/$totalChunks to $viewerId');
-            return;
-          }
-        }
-      }
-    } catch (e) {
-      print('[STREAMER] Error sending frame to $viewerId: $e');
-    }
-  }
-
   Future<void> _handleEncryptedFrame(Uint8List payload, String senderId) async {
     try {
-      if (payload.length < 16) {
-        await _handleSingleFrame(payload, senderId);
-        return;
-      }
+      if (payload.length >= 16) {
+        final frameId = payload.buffer.asByteData().getUint64(0);
+        final chunkIndex = payload.buffer.asByteData().getUint32(8);
+        final totalChunks = payload.buffer.asByteData().getUint32(12);
+        final currentTime = DateTime.now().millisecondsSinceEpoch;
+        final timeDiff = (currentTime - frameId).abs();
 
-      final frameId = payload.buffer.asByteData().getUint64(0);
-      final chunkIndex = payload.buffer.asByteData().getUint32(8);
-      final totalChunks = payload.buffer.asByteData().getUint32(12);
-      final chunkData = payload.sublist(16);
+        if (timeDiff < 10000 &&
+            chunkIndex < 1000 &&
+            totalChunks > 0 &&
+            totalChunks < 1000 &&
+            chunkIndex < totalChunks) {
+          final chunkData = payload.sublist(16);
 
-      if (frameId == 0) {
-        await _handleSingleFrame(payload, senderId);
-        return;
-      }
+          print(
+              '[VIEWER] Received chunk $chunkIndex/$totalChunks for frame $frameId');
 
-      print(
-          '[VIEWER] Received chunk $chunkIndex/$totalChunks for frame $frameId');
+          _frameChunks.putIfAbsent(frameId, () => {});
+          _frameChunks[frameId]![chunkIndex] = chunkData;
+          _expectedChunks[frameId] = totalChunks;
 
-      _frameChunks.putIfAbsent(frameId, () => {});
-      _frameChunks[frameId]![chunkIndex] = chunkData;
-      _expectedChunks[frameId] = totalChunks;
+          final receivedChunks = _frameChunks[frameId]!.length;
+          final completionRatio = receivedChunks / totalChunks;
 
-      if (_frameChunks[frameId]!.length == totalChunks) {
-        final reconstructedBytes = <int>[];
-        for (int i = 0; i < totalChunks; i++) {
-          final chunk = _frameChunks[frameId]![i];
-          if (chunk == null) {
-            print('[VIEWER] Missing chunk $i for frame $frameId');
-            return;
+          if (completionRatio >= 0.8 || receivedChunks == totalChunks) {
+            final reconstructedBytes = <int>[];
+            for (int i = 0; i < totalChunks; i++) {
+              final chunk = _frameChunks[frameId]![i];
+              if (chunk != null) {
+                reconstructedBytes.addAll(chunk);
+              } else {
+                print('[VIEWER] Missing chunk $i, displaying partial frame');
+                break;
+              }
+            }
+
+            if (reconstructedBytes.isNotEmpty) {
+              try {
+                final frameData = Uint8List.fromList(reconstructedBytes);
+                await _handleSingleFrame(frameData, senderId);
+              } catch (e) {
+                print('[VIEWER] Failed to process partial frame: $e');
+              }
+            }
+
+            _frameChunks.remove(frameId);
+            _expectedChunks.remove(frameId);
           }
-          reconstructedBytes.addAll(chunk);
-        }
 
-        try {
-          final frameData = Uint8List.fromList(reconstructedBytes);
-          await _handleSingleFrame(frameData, senderId);
-        } catch (e) {
-          print('[VIEWER] Failed to process frame data: $e');
-        } finally {
-          _frameChunks.remove(frameId);
-          _expectedChunks.remove(frameId);
+          return;
         }
       }
+      print(
+          '[VIEWER] Received single frame from: $senderId, size: ${payload.length}');
+      await _handleSingleFrame(payload, senderId);
     } catch (e) {
       print('[VIEWER] Frame handling error: $e');
+      try {
+        await _handleSingleFrame(payload, senderId);
+      } catch (fallbackError) {
+        print(
+            '[VIEWER] Fallback single frame handling also failed: $fallbackError');
+      }
     }
   }
 
   Future<void> _handleSingleFrame(Uint8List payload, String senderId) async {
+    final receiveTime = DateTime.now().millisecondsSinceEpoch;
+
     try {
-      if (payload.length < StreamCryptoService.nonceLength + 4) {
-        print('[VIEWER] Payload too short: ${payload.length}');
+      print(
+          '[VIEWER] Processing frame from $senderId, payload size: ${payload.length}');
+
+      const minPayloadSize = StreamCryptoService.nonceLength + 4 + 8;
+      if (payload.length < minPayloadSize) {
+        print(
+            '[VIEWER] Payload too short: ${payload.length} < $minPayloadSize bytes');
         return;
       }
 
       final nonce = payload.sublist(0, StreamCryptoService.nonceLength);
-      final timestamp =
-          payload.buffer.asByteData().getUint32(payload.length - 4);
+      print('[VIEWER] Extracted nonce: ${nonce.length} bytes');
+
+      final timestampOffset = payload.length - 12;
+      final timestamp = payload.buffer.asByteData().getInt32(timestampOffset);
+
+      int? frameId;
+      try {
+        final frameIdOffset = payload.length - 8;
+        frameId = payload.buffer.asByteData().getUint64(frameIdOffset);
+      } catch (e) {
+        frameId = receiveTime;
+      }
+      print(
+          '[TIMING] VIEWER: Frame $frameId received at $receiveTime (${payload.length} bytes)');
+
       final encrypted =
-          payload.sublist(StreamCryptoService.nonceLength, payload.length - 4);
+          payload.sublist(StreamCryptoService.nonceLength, timestampOffset);
+      print('[VIEWER] Extracted encrypted data: ${encrypted.length} bytes');
 
       Uint8List? aesKey = _cachedKeys[senderId];
       if (aesKey == null) {
-        aesKey = await StreamKeyExchangeService.getStreamKey(widget.streamId,
-            otherUserId: senderId);
+        print('[VIEWER] Fetching AES key for sender: $senderId');
+        aesKey = await StreamKeyExchangeService.getStreamKey(
+          widget.streamId,
+          otherUserId: senderId,
+        );
         if (aesKey == null) {
           print('[VIEWER] No AES key available for sender: $senderId');
           return;
@@ -727,41 +900,188 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         _cachedKeys[senderId] = aesKey;
       }
 
-      final decrypted = await compute(_isolateDecryptFrame, {
-        'encrypted': encrypted,
-        'aesKey': aesKey,
-        'nonce': nonce,
-        'streamId': widget.streamId,
-        'timestamp': timestamp,
-      });
+      final decryptStartTime = DateTime.now().millisecondsSinceEpoch;
+      Uint8List? decrypted;
 
-      print('[VIEWER] Frame decrypted successfully: ${decrypted.length} bytes');
+      try {
+        print('[VIEWER] Starting native decryption for frameId: $frameId');
 
-      _frameQueue.add(decrypted);
+        decrypted = await NativeVideoPlugin.decryptFrame(
+          encrypted: encrypted,
+          aesKey: aesKey,
+          nonce: nonce,
+          streamId: widget.streamId,
+          timestamp: timestamp,
+          frameId: frameId,
+        );
+        print(
+            '[VIEWER] Native decryption successful: ${decrypted.length} bytes');
+      } catch (e) {
+        print('[VIEWER] Native decryption failed: $e');
+
+        try {
+          print('[VIEWER] Trying Dart fallback decryption...');
+          decrypted = await compute(_isolateDecryptFrame, {
+            'encrypted': encrypted,
+            'nonce': nonce,
+            'aesKey': aesKey,
+            'streamId': widget.streamId,
+            'timestamp': timestamp,
+          });
+          print(
+              '[VIEWER] Dart decryption successful: ${decrypted?.length} bytes');
+        } catch (fallbackError) {
+          print('[VIEWER] Dart decryption also failed: $fallbackError');
+          return;
+        }
+      }
+
+      if (decrypted == null) {
+        print('[VIEWER] Decryption returned null');
+        return;
+      }
+
       _viewerFramesReceived++;
 
-      while (_frameQueue.length > 3) {
-        _frameQueue.removeFirst();
-      }
+      final decryptDuration =
+          DateTime.now().millisecondsSinceEpoch - decryptStartTime;
+      final renderStartTime = DateTime.now().millisecondsSinceEpoch;
 
-      if (_displayTimer == null && mounted) {
-        _startFrameDisplay();
+      _frameBuffer.updateFrame(decrypted, frameId ?? receiveTime);
+
+      _startFrameRenderer();
+
+      if (mounted) {
+        try {
+          // Keep existing latency tracking
+          if (_latencyTestEnabled && frameId != null) {
+            print(
+                '[LATENCY_TEST] Recording frame rendered: $frameId at $renderStartTime');
+
+            _latencyTracker.recordFrameRendered(frameId);
+
+            try {
+              final success =
+                  await NativeVideoPlugin.recordFrameRendered(frameId);
+              if (success) {
+                print(
+                    '[LATENCY_TEST] VIEWER: Frame rendered with ID=$frameId at timestamp=$renderStartTime');
+              } else {
+                print('[LATENCY_TEST] Failed to record in native: $frameId');
+              }
+            } catch (e) {
+              print('[LATENCY_TEST] Native record error: $e');
+            }
+          }
+
+          final decryptTime = DateTime.now().millisecondsSinceEpoch;
+          final networkLatency = decryptTime - receiveTime;
+          print(
+              '[TIMING] VIEWER: Frame $frameId processed in ${networkLatency}ms');
+        } catch (e) {
+          print('[VIEWER] Error in frame processing: $e');
+        }
       }
-    } catch (e) {
-      print('[VIEWER] Frame decryption error: $e');
+    } catch (e, stackTrace) {
+      print(
+          '[TIMING] VIEWER: Frame processing failed after ${DateTime.now().millisecondsSinceEpoch - receiveTime}ms: $e');
+      print('[VIEWER] Critical error in frame handling: $e');
+      print('[VIEWER] Stack trace: $stackTrace');
     }
   }
 
-  void _startFrameDisplay() {
-    _displayTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
-      if (_frameQueue.isNotEmpty && mounted) {
-        final frame = _frameQueue.removeFirst();
+  void _startFrameRenderer() {
+    if (_renderTimer != null) return; // Already running
+
+    _renderTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
+      // 30 FPS max
+      final frame = _frameBuffer.consumeLatestFrame();
+      if (frame != null && mounted) {
         setState(() {
           _currentFrame = frame;
           _remoteVideoConnected = true;
         });
+
+        // Complete the frame processing cycle
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _frameBuffer.setProcessingComplete();
+        });
       }
     });
+  }
+
+  Future<void> _startEntropyTest() async {
+    if (!widget.isStreamer) return; // Only streamer collects entropy
+
+    print('[ENTROPY_TEST] Starting 60-second entropy collection...');
+
+    final started = await NativeVideoPlugin.startEntropyTest();
+    if (started) {
+      setState(() {
+        _entropyTestEnabled = true;
+      });
+
+      // Stop after 60 seconds
+      _entropyTestTimer = Timer(const Duration(seconds: 60), () async {
+        await _stopEntropyTest();
+      });
+
+      // Update stats every 5 seconds
+      Timer.periodic(const Duration(seconds: 5), (timer) async {
+        if (!_entropyTestEnabled) {
+          timer.cancel();
+          return;
+        }
+
+        final stats = await NativeVideoPlugin.getEntropyTestStats();
+        if (stats != null) {
+          setState(() {
+            _entropyStats = stats;
+          });
+        }
+      });
+    }
+  }
+
+  Future<void> _stopEntropyTest() async {
+    print('[ENTROPY_TEST] Stopping entropy collection...');
+
+    final result = await NativeVideoPlugin.stopEntropyTest();
+    _entropyTestTimer?.cancel();
+
+    setState(() {
+      _entropyTestEnabled = false;
+    });
+
+    if (result is Map<String, dynamic>) {
+      final framesCollected = result['framesCollected'] ?? 0;
+      final outputDir = result['outputDir'] ?? 'unknown';
+
+      print('[ENTROPY_TEST] Collection complete:');
+      print('  - Frames collected: $framesCollected');
+      print('  - Output directory: $outputDir');
+
+      // Show completion dialog
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Entropy Test Complete'),
+            content: Text(
+              'Collected $framesCollected encrypted frames.\n\n'
+              'Files saved to:\n$outputDir\n\n'
+              'Copy the "ciphertext" folder to your computer to run entropy analysis.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+      }
+    }
   }
 
   Future<void> _preloadViewerKey() async {
@@ -804,6 +1124,20 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
 
   @override
   void dispose() {
+    _renderTimer?.cancel();
+
+    _audioDelayTimer?.cancel();
+    _pendingAudioTrack?.dispose();
+
+    if (_latencyTestEnabled) {
+      _latencyTracker.stop();
+      _latencyStatsTimer?.cancel();
+    }
+
+    if (_nativePipelineActive) {
+      NativeVideoPlugin.stopVideoStream();
+    }
+
     if (_isImageStreamActive && _cameraController.value.isInitialized) {
       try {
         _cameraController.stopImageStream();
@@ -813,26 +1147,24 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       }
     }
 
-    _displayTimer?.cancel();
-    _frameTimer?.cancel();
     _keyRotationTimer?.cancel();
-    _keyRefreshTimer?.cancel();
     _fpsTimer?.cancel();
-
-    _frameQueue.clear();
+    _nativeStatsTimer?.cancel();
 
     _cameraController.dispose();
-    _isFrameSendingActive = false;
     _cachedKeys.clear();
+
     if (widget.isStreamer) {
       _endStream();
       StreamKeyExchangeService.cleanupStreamKeys(widget.streamId);
     }
+
     _isDisposed = true;
     _streamStatusSubscription?.cancel();
     _chatSubscription?.cancel();
     _chatController.dispose();
     _chatFocusNode.dispose();
+
     super.dispose();
   }
 
@@ -996,6 +1328,165 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     );
   }
 
+  Widget _buildVideoDisplay() {
+    if (widget.isStreamer) {
+      if (_cameraController.value.isInitialized &&
+          _cameraController.value.previewSize != null) {
+        final previewSize = _cameraController.value.previewSize!;
+        return FittedBox(
+          fit: BoxFit.cover,
+          child: SizedBox(
+            width: previewSize.height,
+            height: previewSize.width,
+            child: RepaintBoundary(
+              key: _previewContainerKey,
+              child: _cameraPreviewWidget!,
+            ),
+          ),
+        );
+      } else {
+        return const Center(child: Text('Initializing camera...'));
+      }
+    } else {
+      if (_currentFrame != null) {
+        return RepaintBoundary(
+          child: FittedBox(
+            fit: BoxFit.cover,
+            child: SizedBox(
+              width: 426,
+              height: 240,
+              child: Image.memory(
+                _currentFrame!,
+                gaplessPlayback: true,
+                fit: BoxFit.fill,
+                filterQuality: FilterQuality.low,
+                errorBuilder: (context, error, stackTrace) {
+                  print('[VIEWER] Frame render error: $error');
+                  return Container(color: Colors.black);
+                },
+              ),
+            ),
+          ),
+        );
+      } else {
+        return Container(
+          color: Colors.black,
+          child: Center(
+            child: _isEncryptionReady
+                ? const Text(
+                    'Connecting...',
+                    style: TextStyle(color: Colors.white70, fontSize: 14),
+                  )
+                : const Text(
+                    'Establishing connection...',
+                    style: TextStyle(color: Colors.white70, fontSize: 14),
+                  ),
+          ),
+        );
+      }
+    }
+  }
+
+  Widget _buildLatencyStatsOverlay() {
+    if (!_latencyTestEnabled || _currentLatencyStats.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Positioned(
+      top: 100,
+      right: 16,
+      child: Container(
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.7),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'E2E LATENCY',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 10,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Avg: ${_currentLatencyStats['average']?.toStringAsFixed(1) ?? 'N/A'}ms',
+              style: const TextStyle(color: Colors.white, fontSize: 9),
+            ),
+            Text(
+              'P95: ${_currentLatencyStats['p95']?.toStringAsFixed(1) ?? 'N/A'}ms',
+              style: const TextStyle(color: Colors.white, fontSize: 9),
+            ),
+            Text(
+              'Samples: ${_currentLatencyStats['samples']?.toInt() ?? 0}',
+              style: const TextStyle(color: Colors.white70, fontSize: 8),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEntropyTestUI() {
+    if (!widget.isStreamer) return const SizedBox.shrink();
+
+    return Positioned(
+      top: 150,
+      right: 16,
+      child: Container(
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: Colors.black.withOpacity(0.8),
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'ENTROPY TEST',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 10,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 4),
+            if (_entropyTestEnabled) ...[
+              Text(
+                'Collecting...',
+                style: const TextStyle(color: Colors.green, fontSize: 9),
+              ),
+              Text(
+                'Frames: ${_entropyStats['framesCollected'] ?? 0}',
+                style: const TextStyle(color: Colors.white, fontSize: 9),
+              ),
+            ] else ...[
+              GestureDetector(
+                onTap: _startEntropyTest,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.blue,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: const Text(
+                    'START',
+                    style: TextStyle(color: Colors.white, fontSize: 8),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_hasError) {
@@ -1003,19 +1494,27 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         appBar: AppBar(title: const Text('Live Stream')),
         body: const Center(
           child: Text(
-            'Error loading the stream. Please try again later.',
-            style: TextStyle(fontSize: 18),
+            'Connection failed. Please try again.',
+            style: TextStyle(fontSize: 16),
           ),
         ),
       );
     }
 
     if (_isLoading) {
-      return Scaffold(
-        appBar: AppBar(title: const Text('Live Stream')),
-        body: const Center(
-          child: CircularProgressIndicator(
-            color: Colors.white,
+      return const Scaffold(
+        backgroundColor: Colors.black,
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(color: Colors.white),
+              SizedBox(height: 16),
+              Text(
+                'Joining stream...',
+                style: TextStyle(color: Colors.white),
+              ),
+            ],
           ),
         ),
       );
@@ -1027,64 +1526,12 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         children: [
           Stack(
             children: [
-              AspectRatio(
-                aspectRatio: 16 / 9,
-                child: Container(
-                  color: Colors.black,
-                  child: widget.isStreamer
-                      ? RepaintBoundary(
-                          key: _previewContainerKey,
-                          child: _cameraPreviewWidget ??
-                              const Center(
-                                  child: Text('Initializing camera...')),
-                        )
-                      : _currentFrame != null
-                          ? Container(
-                              decoration: BoxDecoration(
-                                  border: Border.all(color: Colors.red)),
-                              child: Image.memory(
-                                _currentFrame!,
-                                fit: BoxFit.contain,
-                                gaplessPlayback: true,
-                                frameBuilder: (context, child, frame, wasSync) {
-                                  if (frame == null) {
-                                    return const Center(
-                                      child: CircularProgressIndicator(
-                                          color: Colors.white),
-                                    );
-                                  }
-                                  return AnimatedSwitcher(
-                                    duration: const Duration(milliseconds: 50),
-                                    child: child,
-                                  );
-                                },
-                                errorBuilder: (context, error, stackTrace) {
-                                  return const Center(
-                                    child: Text(
-                                      'Failed to render frame',
-                                      style: TextStyle(color: Colors.red),
-                                    ),
-                                  );
-                                },
-                              ),
-                            )
-                          : Center(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  const CircularProgressIndicator(
-                                      color: Colors.white),
-                                  const SizedBox(height: 16),
-                                  Text(
-                                    _isEncryptionReady
-                                        ? 'Waiting for encrypted frames...'
-                                        : 'Establishing secure connection...',
-                                    style: const TextStyle(color: Colors.white),
-                                  ),
-                                ],
-                              ),
-                            ),
-                ),
+              Container(
+                color: Colors.black,
+                child: SizedBox(
+                    width: double.infinity,
+                    height: MediaQuery.of(context).size.width * 9 / 16,
+                    child: _buildVideoDisplay()),
               ),
               SafeArea(
                 child: Padding(
@@ -1100,26 +1547,10 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
                   ),
                 ),
               ),
-              SafeArea(
-                child: Align(
-                  alignment: Alignment.topRight,
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: IconButton(
-                      icon: const Icon(Icons.settings, color: Colors.white),
-                      onPressed: () {
-                        //  settings
-                      },
-                    ),
-                  ),
-                ),
-              ),
+              _buildLatencyStatsOverlay(),
+              _buildEntropyTestUI(),
             ],
           ),
-          // if (!widget.isStreamer && !_remoteVideoConnected)
-          //   const Center(
-          //     child: CircularProgressIndicator(color: Colors.white),
-          //   ),
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             color: const Color(0xFFE5E5E5),
@@ -1159,6 +1590,44 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
                               fontSize: 14,
                             ),
                           ),
+                          const Spacer(),
+                          if (widget.isStreamer)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: _getFpsColor(),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(
+                                '${_getCurrentFps().toStringAsFixed(0)} FPS',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          if (!widget.isStreamer &&
+                              _currentLatencyStats.isNotEmpty)
+                            Container(
+                              margin: const EdgeInsets.only(left: 8),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: _getLatencyColor(
+                                    _currentLatencyStats['average'] ?? 0),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                '${(_currentLatencyStats['average'] ?? 0).toStringAsFixed(0)}ms',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
                         ],
                       ),
                     ],
@@ -1173,5 +1642,26 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         ],
       ),
     );
+  }
+
+  Color _getLatencyColor(double latency) {
+    if (latency <= 100) return Colors.green;
+    if (latency <= 200) return Colors.orange;
+    return Colors.red;
+  }
+
+  Color _getFpsColor() {
+    final fps = _getCurrentFps();
+    if (fps >= 25) return Colors.green;
+    if (fps >= 15) return Colors.orange;
+    return Colors.red;
+  }
+
+  double _getCurrentFps() {
+    if (widget.isStreamer) {
+      return _nativeFPS;
+    } else {
+      return _viewerFPS;
+    }
   }
 }

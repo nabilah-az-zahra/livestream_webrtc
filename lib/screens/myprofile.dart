@@ -124,7 +124,7 @@ class _MyProfilePageState extends State<MyProfilePage> {
   }
 
   Widget _buildStreamInfo() {
-    return Container(
+    return SizedBox(
       width: MediaQuery.of(context).size.width,
       child: Card(
         elevation: 2,
