@@ -304,7 +304,7 @@ class EcdhService {
       return;
     }
 
-    print('[ECDH] Key pair missing. Generating now...');
+    print('[ECDH] Key pair missing. Generating now');
     final result = await EcdhService.generateKeyPair();
     if (!result['success']) throw Exception(result['error']);
 

@@ -13,7 +13,6 @@ class LiveKitService {
   final StreamController<ConnectionState> _connectionStateController =
       StreamController<ConnectionState>.broadcast();
 
-  // Performance tracking
   int _framesSent = 0;
   int _framesDropped = 0;
   int _lastStatsTime = DateTime.now().millisecondsSinceEpoch;
@@ -31,7 +30,7 @@ class LiveKitService {
 
     localParticipant = room.localParticipant;
 
-    print('[LIVEKIT] Connected as streamer - optimized for low latency');
+    print('[LIVEKIT] Connected as streamer');
   }
 
   Future<void> connectAsViewer(String url, String token) async {
@@ -47,7 +46,7 @@ class LiveKitService {
     localParticipant = room.localParticipant;
     await room.setSpeakerOn(true);
 
-    print('[LIVEKIT] Connected as viewer with low-latency configuration');
+    print('[LIVEKIT] Connected as viewer');
   }
 
   void _setupEventListener() {
@@ -117,8 +116,6 @@ class LiveKitService {
     }
   }
 
-  /// OPTIMIZED: Direct video frame publishing without queue
-  /// This is the main method for sending video frames
   Future<bool> publishVideoFrameImmediate(
     Uint8List bytes, {
     List<String>? destinationIdentities,
@@ -131,19 +128,17 @@ class LiveKitService {
     try {
       final startTime = DateTime.now().microsecondsSinceEpoch;
 
-      // CRITICAL: Use unreliable delivery for video frames to minimize latency
       await localParticipant!.publishData(
         bytes,
-        reliable: false, // KEY OPTIMIZATION: False for low latency
+        reliable: false,
         destinationIdentities: destinationIdentities,
       );
 
       final endTime = DateTime.now().microsecondsSinceEpoch;
-      final duration = (endTime - startTime) / 1000; // Convert to milliseconds
+      final duration = (endTime - startTime) / 1000;
 
       _framesSent++;
 
-      // Log performance every 30 frames
       if (_framesSent % 30 == 0) {
         print(
             '[LIVEKIT] Frame sent in ${duration.toStringAsFixed(2)}ms (total: $_framesSent)');
@@ -154,11 +149,9 @@ class LiveKitService {
       _framesDropped++;
       print('[LIVEKIT] Error in immediate video send: $e');
 
-      // Don't let errors accumulate - reset connection if too many failures
       if (_framesDropped > 10 && _framesSent > 0) {
         final errorRate = _framesDropped / (_framesSent + _framesDropped);
         if (errorRate > 0.1) {
-          // More than 10% error rate
           print(
               '[LIVEKIT] High error rate detected: ${(errorRate * 100).toStringAsFixed(1)}%');
         }
@@ -168,7 +161,6 @@ class LiveKitService {
     }
   }
 
-  /// SIMPLIFIED: Direct data publishing without queue
   Future<bool> publishData(
     Uint8List bytes,
     bool reliable, {
@@ -192,7 +184,6 @@ class LiveKitService {
     }
   }
 
-  /// REMOVED: Bulk publishing - use individual calls for better control
   Future<bool> publishDataBulk(
     Map<String, Uint8List> recipientData,
     bool reliable,
@@ -203,7 +194,6 @@ class LiveKitService {
     }
 
     try {
-      // Process each recipient individually for better error handling
       final futures = recipientData.entries.map((entry) async {
         try {
           await localParticipant!.publishData(
@@ -247,7 +237,7 @@ class LiveKitService {
 
   Map<String, dynamic> getRoomStats() {
     final now = DateTime.now().millisecondsSinceEpoch;
-    final timeDiff = (now - _lastStatsTime) / 1000.0; // Convert to seconds
+    final timeDiff = (now - _lastStatsTime) / 1000.0;
 
     final stats = {
       'connected': room.connectionState == ConnectionState.connected,
@@ -257,7 +247,6 @@ class LiveKitService {
       'roomSid': room.metadata,
       'participantStreams': _participantStreams.length,
       'connectionQuality': room.connectionState.toString(),
-      // Performance metrics
       'framesSent': _framesSent,
       'framesDropped': _framesDropped,
       'avgFPS': timeDiff > 0 ? _framesSent / timeDiff : 0,
@@ -283,7 +272,6 @@ class LiveKitService {
     return _connectionStateController.stream;
   }
 
-  /// SIMPLIFIED: No queue stats since we removed the queue
   Map<String, int> getPerformanceStats() {
     return {
       'framesSent': _framesSent,
@@ -293,7 +281,6 @@ class LiveKitService {
     };
   }
 
-  /// Reset performance counters
   void resetPerformanceStats() {
     _framesSent = 0;
     _framesDropped = 0;
@@ -314,12 +301,11 @@ class LiveKitService {
     _connectionStateController.close();
     await room.disconnect();
 
-    // Print final stats
     final errorRate = _framesSent > 0
         ? (_framesDropped / (_framesSent + _framesDropped)) * 100
         : 0;
     print(
-        '[LIVEKIT] Disconnected - Final stats: ${_framesSent} frames sent, ${_framesDropped} dropped (${errorRate.toStringAsFixed(1)}% error rate)');
+        '[LIVEKIT] Disconnected final stats: ${_framesSent} frames sent, ${_framesDropped} dropped (${errorRate.toStringAsFixed(1)}% error rate)');
   }
 }
 

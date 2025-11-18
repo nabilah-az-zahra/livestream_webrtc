@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-// import 'dart:math' as math;
-// import 'dart:ui' as ui;
 import 'package:camera/camera.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -10,12 +8,11 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:http/http.dart' as http;
-// import 'package:image/image.dart' as img;
 import 'package:livekit_client/livekit_client.dart';
-import 'package:livestream_webrtc/main.dart';
-import 'package:livestream_webrtc/livekit_service.dart';
-import 'package:livestream_webrtc/exchange_service.dart';
 import 'package:livestream_webrtc/e2ee_service.dart';
+import 'package:livestream_webrtc/exchange_service.dart';
+import 'package:livestream_webrtc/livekit_service.dart';
+import 'package:livestream_webrtc/main.dart';
 import 'package:livestream_webrtc/native_video_plugin.dart';
 
 class LiveStreamPage extends StatefulWidget {
@@ -77,131 +74,12 @@ class ChatMessage {
   }
 }
 
-class LatencyTracker {
-  final Map<int, int> _frameCaptureTimestamps = {};
-  final Map<int, int> _frameRenderTimestamps = {};
-  final List<double> _latencySamples = [];
-
-  Timer? _cleanupTimer;
-  Timer? _statsTimer;
-
-  void start() {
-    _cleanupTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      _cleanup();
-    });
-
-    _statsTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-      _printCurrentStats();
-    });
-
-    print('[LATENCY_TRACKER] Started with cleanup and stats timers');
-  }
-
-  void stop() {
-    _cleanupTimer?.cancel();
-    _statsTimer?.cancel();
-    _frameCaptureTimestamps.clear();
-    _frameRenderTimestamps.clear();
-    print('[LATENCY_TRACKER] Stopped and cleaned up');
-  }
-
-  void recordFrameCaptured(int frameId) {
-    final captureTime = DateTime.now().millisecondsSinceEpoch;
-    _frameCaptureTimestamps[frameId] = captureTime;
-    print(
-        '[LATENCY_TRACKER] DART: Frame captured with ID=$frameId at timestamp=$captureTime');
-  }
-
-  void recordFrameRendered(int frameId) {
-    final renderTime = DateTime.now().millisecondsSinceEpoch;
-    _frameRenderTimestamps[frameId] = renderTime;
-
-    final captureTime = _frameCaptureTimestamps[frameId];
-    if (captureTime != null) {
-      final latency = (renderTime - captureTime).toDouble();
-      if (latency > 0 && latency < 10000) {
-        _latencySamples.add(latency);
-        print(
-            '[LATENCY_TRACKER] DART: E2E Latency for frame $frameId: ${latency.toStringAsFixed(2)}ms');
-        print(
-            '[LATENCY_TRACKER] Capture: $captureTime, Render: $renderTime, Latency: ${latency.toStringAsFixed(2)}ms');
-
-        if (_latencySamples.length > 100) {
-          _latencySamples.removeAt(0);
-        }
-      } else {
-        print(
-            '[LATENCY_TRACKER] Invalid latency for frame $frameId: ${latency}ms');
-      }
-    } else {
-      print('[LATENCY_TRACKER] No capture timestamp for frame $frameId');
-      print(
-          '[LATENCY_TRACKER] Available capture frames: ${_frameCaptureTimestamps.keys.take(5).toList()}');
-    }
-  }
-
-  void _cleanup() {
-    final now = DateTime.now().millisecondsSinceEpoch;
-    const maxAge = 60000;
-
-    final captureCountBefore = _frameCaptureTimestamps.length;
-    final renderCountBefore = _frameRenderTimestamps.length;
-
-    _frameCaptureTimestamps
-        .removeWhere((_, timestamp) => now - timestamp > maxAge);
-    _frameRenderTimestamps
-        .removeWhere((_, timestamp) => now - timestamp > maxAge);
-
-    final captureCountAfter = _frameCaptureTimestamps.length;
-    final renderCountAfter = _frameRenderTimestamps.length;
-
-    print(
-        '[LATENCY_TRACKER] Cleanup: Capture $captureCountBeforeâ†’$captureCountAfter, Render $renderCountBeforeâ†’$renderCountAfter');
-  }
-
-  void _printCurrentStats() {
-    if (_latencySamples.isEmpty) {
-      print(
-          '[LATENCY_TRACKER] No latency samples yet. Captures: ${_frameCaptureTimestamps.length}, Renders: ${_frameRenderTimestamps.length}');
-      return;
-    }
-
-    final sortedSamples = List<double>.from(_latencySamples)..sort();
-    final avg = sortedSamples.reduce((a, b) => a + b) / sortedSamples.length;
-    final median = sortedSamples[sortedSamples.length ~/ 2];
-    final p95 = sortedSamples[(sortedSamples.length * 0.95).toInt()];
-
-    print('\n [DART REALTIME LATENCY STATS] Samples: ${sortedSamples.length}');
-    print('   Average: ${avg.toStringAsFixed(2)}ms');
-    print('   Median: ${median.toStringAsFixed(2)}ms');
-    print('   95th percentile: ${p95.toStringAsFixed(2)}ms');
-    print('   Captures tracked: ${_frameCaptureTimestamps.length}');
-    print('   Renders tracked: ${_frameRenderTimestamps.length}\n');
-  }
-
-  Map<String, double> getCurrentStats() {
-    if (_latencySamples.isEmpty) return {};
-
-    final sortedSamples = List<double>.from(_latencySamples)..sort();
-    return {
-      'samples': sortedSamples.length.toDouble(),
-      'average': sortedSamples.reduce((a, b) => a + b) / sortedSamples.length,
-      'median': sortedSamples[sortedSamples.length ~/ 2],
-      'min': sortedSamples.first,
-      'max': sortedSamples.last,
-      'p95': sortedSamples[(sortedSamples.length * 0.95).toInt()],
-      'p99': sortedSamples[(sortedSamples.length * 0.99).toInt()],
-    };
-  }
-}
-
 class FrameBuffer {
   Uint8List? _latestFrame;
   int _latestFrameId = 0;
   bool _isProcessing = false;
 
   void updateFrame(Uint8List frame, int frameId) {
-    // Always keep only the LATEST frame
     if (frameId > _latestFrameId && !_isProcessing) {
       _latestFrame = frame;
       _latestFrameId = frameId;
@@ -212,7 +90,7 @@ class FrameBuffer {
     if (_latestFrame != null) {
       _isProcessing = true;
       final frame = _latestFrame;
-      _latestFrame = null; // Clear after consuming
+      _latestFrame = null;
       return frame;
     }
     return null;
@@ -231,22 +109,11 @@ Future<Uint8List> _isolateDecryptFrame(Map<String, dynamic> params) async {
     final String streamId = params['streamId'];
     final int timestamp = params['timestamp'];
 
-    print('[ISOLATE_DECRYPT] Starting Dart decryption...');
-    print('[ISOLATE_DECRYPT] Parameters:');
-    print('  - encrypted.length: ${encrypted.length}');
-    print('  - aesKey.length: ${aesKey.length}');
-    print('  - nonce.length: ${nonce.length}');
-    print('  - streamId: $streamId');
-    print('  - timestamp: $timestamp');
-
     final aad = StreamCryptoService.buildAad(streamId, timestamp);
-    print('[ISOLATE_DECRYPT] AAD: ${utf8.decode(aad)}');
-
     final cipher =
         StreamCryptoService.createAesGcmCipher(false, aesKey, nonce, aad: aad);
     final decrypted = cipher.process(encrypted);
 
-    print('[ISOLATE_DECRYPT] Decryption successful: ${decrypted.length} bytes');
     return decrypted;
   } catch (e, stackTrace) {
     print('[ISOLATE_DECRYPT] Decryption failed: $e');
@@ -257,43 +124,29 @@ Future<Uint8List> _isolateDecryptFrame(Map<String, dynamic> params) async {
 
 class _LiveStreamPageState extends State<LiveStreamPage> {
   final GlobalKey _previewContainerKey = GlobalKey();
-  final Map<String, Uint8List?> _cachedKeys = {};
   final LiveKitService _liveKitService = LiveKitService();
-  final Set<String> _connectedViewers = {};
-  final Map<int, Map<int, Uint8List>> _frameChunks = {};
   final Map<int, int> _expectedChunks = {};
+  final Map<int, Map<int, Uint8List>> _frameChunks = {};
+  final Map<String, Uint8List?> _cachedKeys = {};
+  final Set<String> _connectedViewers = {};
+
+  bool _isImageStreamActive = false;
+  bool _useNativePipeline = true;
+  bool _nativePipelineActive = false;
+
   late CameraController _cameraController;
   Widget? _cameraPreviewWidget;
 
+  int _viewerFramesReceived = 0;
   Timer? _keyRotationTimer;
-  Timer? _fpsTimer;
   Uint8List? _currentFrame;
 
-  bool _isImageStreamActive = false;
-
-  bool _useNativePipeline = true;
-  bool _nativePipelineActive = false;
-  double _nativeFPS = 0.0;
-  Timer? _nativeStatsTimer;
-
-  int _viewerFramesReceived = 0;
-  double _viewerFPS = 0.0;
-
-  Timer? _audioDelayTimer;
   bool _audioPublished = false;
   LocalAudioTrack? _pendingAudioTrack;
-
-  final LatencyTracker _latencyTracker = LatencyTracker();
-  bool _latencyTestEnabled = true;
-  Timer? _latencyStatsTimer;
-  Map<String, double> _currentLatencyStats = {};
+  Timer? _audioDelayTimer;
 
   final FrameBuffer _frameBuffer = FrameBuffer();
   Timer? _renderTimer;
-
-  bool _entropyTestEnabled = false;
-  Timer? _entropyTestTimer;
-  Map<String, dynamic> _entropyStats = {};
 
   bool _isLoading = true;
   bool _hasError = false;
@@ -321,11 +174,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       _setupKeyRotation();
       _listenToStreamStatus();
       _initializeChat();
-      _startFPSMonitoring();
-
-      if (_latencyTestEnabled) {
-        _initializeLatencyTesting();
-      }
 
       if (!widget.isStreamer) {
         _preloadViewerKey();
@@ -343,81 +191,15 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     }
   }
 
-  void _initializeLatencyTesting() {
-    print('[LATENCY_TEST] Initializing end-to-end latency testing...');
-
-    _latencyTracker.start();
-
-    _latencyStatsTimer = Timer.periodic(const Duration(seconds: 15), (_) async {
-      final nativeStats = await NativeVideoPlugin.getLatencyStats();
-      final dartStats = _latencyTracker.getCurrentStats();
-
-      setState(() {
-        _currentLatencyStats = dartStats;
-      });
-
-      if (nativeStats != null && nativeStats.isNotEmpty) {
-        print('\n [NATIVE LATENCY STATS]');
-        NativeVideoPlugin.printLatencyStats(nativeStats);
-      }
-
-      if (dartStats.isNotEmpty) {
-        print('\n [DART LATENCY STATS]');
-        print('Samples: ${dartStats['samples']?.toInt()}');
-        print('Average: ${dartStats['average']?.toStringAsFixed(2)}ms');
-        print('Median: ${dartStats['median']?.toStringAsFixed(2)}ms');
-        print('95th percentile: ${dartStats['p95']?.toStringAsFixed(2)}ms');
-      }
-    });
-
-    print('[LATENCY_TEST] Latency testing initialized');
-  }
-
   Future<void> _initializeNativePipeline() async {
     try {
-      print('[NATIVE_PIPELINE] Initializing native video pipeline...');
-      print('[NATIVE_PIPELINE] Setting up callbacks...');
-
-      NativeVideoPlugin.onEncryptedFrame((data, viewerId, {frameId}) {
-        print(
-            '[NATIVE_HANDLER] RECEIVED encrypted frame for $viewerId: ${data.length} bytes');
+      NativeVideoPlugin.onEncryptedFrame((data, viewerId) {
         _handleNativeEncryptedFrame(data, viewerId);
       });
-
-      NativeVideoPlugin.onFpsUpdate((fps) {
-        print('[NATIVE_HANDLER] FPS update: $fps');
-        if (mounted) {
-          setState(() {
-            _nativeFPS = fps.toDouble();
-          });
-        }
-      });
-
-      await NativeVideoPlugin.setTargetFPS(30);
-
-      print('[NATIVE_PIPELINE] Native pipeline initialized successfully');
     } catch (e) {
       print('[NATIVE_PIPELINE] Failed to initialize: $e');
       _useNativePipeline = false;
     }
-  }
-
-  void _startFPSMonitoring() {
-    _fpsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (widget.isStreamer) {
-        print(
-            '[NATIVE_FPS] Native pipeline: ${_nativeFPS.toStringAsFixed(1)}/sec');
-      } else {
-        _viewerFPS = (_viewerFramesReceived / 1.0);
-        print(
-            '[VIEWER_FPS] Frames received: ${_viewerFPS.toStringAsFixed(1)}/sec');
-        _viewerFramesReceived = 0;
-      }
-
-      if (mounted) {
-        setState(() {});
-      }
-    });
   }
 
   void _setupKeyRotation() {
@@ -497,9 +279,15 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     try {
       final userId = FirebaseAuth.instance.currentUser!.uid;
 
+      print(
+          '[DEBUG] Request URL: https://socket-server-eight-eta.vercel.app/get-livekit-token');
+      print('[DEBUG] User ID: $userId');
+      print('[DEBUG] Stream ID: ${widget.streamId}');
+      print('[DEBUG] Is Streamer: ${widget.isStreamer}');
+
       final response = await http.post(
         Uri.parse(
-            'https://socket-server-production-23a9.up.railway.app/get-livekit-token'),
+            'https://socket-server-eight-eta.vercel.app/get-livekit-token'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'identity': userId,
@@ -507,6 +295,9 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
           'isPublisher': widget.isStreamer,
         }),
       );
+
+      print('[DEBUG] Response status: ${response.statusCode}');
+      print('[DEBUG] Response body: ${response.body}');
 
       if (response.statusCode != 200) {
         throw Exception(
@@ -523,13 +314,10 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       if (widget.isStreamer) {
         await _liveKitService.connectAsStreamer(
             widget.liveKitUrl, liveKitToken);
-        print('[LIVEKIT] Connected as streamer');
 
         await _initializeCameraPreview();
-        print('[STREAMER] Camera initialized');
 
         _pendingAudioTrack = await LocalAudioTrack.create();
-        print('[AUDIO_SYNC] Audio track created, will publish with delay');
 
         _liveKitService.room.events.listen((event) {
           if (event is ParticipantConnectedEvent) {
@@ -561,18 +349,14 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
           }
         });
       } else {
-        print('[VIEWER] Starting as viewer...');
-
         if (widget.streamerId.isEmpty) {
           throw Exception('Streamer ID is missing or invalid');
         }
 
         await _liveKitService.connectAsViewer(widget.liveKitUrl, liveKitToken);
-        print('[LIVEKIT] Connected as viewer');
 
         _liveKitService.onData((Uint8List data, RemoteParticipant participant) {
           final senderId = participant.identity;
-          print('[VIEWER] Received data from: $senderId, size: ${data.length}');
           _handleEncryptedFrame(data, senderId);
         });
 
@@ -582,8 +366,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       setState(() {
         _isLoading = false;
       });
-
-      print('[INIT] Stream initialization completed successfully');
     } catch (e) {
       print('Error in stream initialization: $e');
       setState(() {
@@ -601,7 +383,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         await _liveKitService.localParticipant
             ?.publishAudioTrack(_pendingAudioTrack!);
         _audioPublished = true;
-        print('[AUDIO_SYNC] Audio published successfully with delay');
       } catch (e) {
         print('[AUDIO_SYNC] Error publishing delayed audio: $e');
       }
@@ -610,8 +391,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
 
   Future<void> _onViewerConnected(String viewerId) async {
     try {
-      print('[STREAMER] Processing viewer connection: $viewerId');
-
       await tryKeyExchangeWithViewer(
         streamerId: FirebaseAuth.instance.currentUser!.uid,
         viewerId: viewerId,
@@ -624,23 +403,14 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       );
 
       if (aesKey != null) {
-        print('[NATIVE_PIPELINE] Adding viewer $viewerId with AES key');
         final success = await NativeVideoPlugin.addViewer(
           viewerId: viewerId,
           aesKey: aesKey,
         );
-        print('[NATIVE_PIPELINE] Add viewer result: $success');
 
-        if (success) {
-          print('[NATIVE_PIPELINE] Added viewer with key: $viewerId');
-          if (_connectedViewers.length == 1) {
-            _startNativePipeline();
-          }
-        } else {
-          print('[NATIVE_PIPELINE] Failed to add viewer: $viewerId');
+        if (success && _connectedViewers.length == 1) {
+          _startNativePipeline();
         }
-      } else {
-        print('[NATIVE_PIPELINE] No AES key available for viewer: $viewerId');
       }
     } catch (e) {
       print('[STREAMER] Error handling viewer connection: $e');
@@ -650,13 +420,11 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
   Future<void> _onViewerDisconnected(String viewerId) async {
     if (_useNativePipeline) {
       await NativeVideoPlugin.removeViewer(viewerId);
-      print('[NATIVE_PIPELINE] Removed viewer: $viewerId');
     }
   }
 
   Future<void> _startNativePipeline() async {
     if (!NativeVideoPlugin.isAvailable) {
-      print('[NATIVE_PIPELINE] Native pipeline not available');
       setState(() {
         _hasError = true;
       });
@@ -664,8 +432,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     }
 
     try {
-      print('[NATIVE_PIPELINE] Starting native video pipeline...');
-
       final success = await NativeVideoPlugin.startVideoStream(
         streamId: widget.streamId,
         viewers: _connectedViewers.toList(),
@@ -675,16 +441,8 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         _nativePipelineActive = true;
 
         if (!_isImageStreamActive) {
-          print('[NATIVE_PIPELINE] Starting camera image stream...');
-
           _cameraController.startImageStream((CameraImage image) {
             if (_nativePipelineActive) {
-              final frameId = DateTime.now().microsecondsSinceEpoch;
-              if (_latencyTestEnabled) {
-                _latencyTracker.recordFrameCaptured(frameId);
-                print('[LATENCY_TEST] Dart: Frame captured $frameId');
-              }
-
               NativeVideoPlugin.processFrame(image).catchError((error) {
                 print('[NATIVE_PIPELINE] Frame processing error: $error');
               });
@@ -707,8 +465,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     if (!_nativePipelineActive) return;
 
     try {
-      print('[NATIVE_PIPELINE] Stopping native video pipeline...');
-
       await NativeVideoPlugin.stopVideoStream();
       _nativePipelineActive = false;
 
@@ -720,15 +476,12 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
           print('[NATIVE_PIPELINE] Error stopping image stream: $e');
         }
       }
-
-      print('[NATIVE_PIPELINE] Native pipeline stopped');
     } catch (e) {
       print('[NATIVE_PIPELINE] Error stopping native pipeline: $e');
     }
   }
 
   void _handleNativeEncryptedFrame(Uint8List data, String viewerId) {
-    // Direct call, no timing overhead
     _liveKitService.publishVideoFrameImmediate(data,
         destinationIdentities: [viewerId]).catchError((error) {
       print('[FRAME_ERROR] Failed to send frame: $error');
@@ -738,15 +491,12 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
   void _performKeyExchange() async {
     final userId = FirebaseAuth.instance.currentUser!.uid;
 
-    print('[VIEWER] Starting key exchange with streamer: ${widget.streamerId}');
-
     bool keyExchangeSuccess = false;
     int attempts = 0;
     const maxAttempts = 10;
 
     while (!keyExchangeSuccess && attempts < maxAttempts && mounted) {
       attempts++;
-      print('[VIEWER] Key exchange attempt $attempts/$maxAttempts');
 
       try {
         final keyExchange = await StreamKeyExchangeService.generateSharedSecret(
@@ -757,7 +507,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         );
 
         if (keyExchange['success'] == true) {
-          print('[VIEWER] Key exchange successful');
           await _preloadViewerKey();
 
           if (mounted) {
@@ -768,11 +517,9 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
           keyExchangeSuccess = true;
           break;
         } else {
-          print('[VIEWER] Key exchange failed: ${keyExchange['error']}');
           await Future.delayed(const Duration(seconds: 2));
         }
       } catch (e) {
-        print('[VIEWER] Key exchange error: $e');
         await Future.delayed(const Duration(seconds: 2));
       }
     }
@@ -800,9 +547,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
             chunkIndex < totalChunks) {
           final chunkData = payload.sublist(16);
 
-          print(
-              '[VIEWER] Received chunk $chunkIndex/$totalChunks for frame $frameId');
-
           _frameChunks.putIfAbsent(frameId, () => {});
           _frameChunks[frameId]![chunkIndex] = chunkData;
           _expectedChunks[frameId] = totalChunks;
@@ -817,7 +561,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
               if (chunk != null) {
                 reconstructedBytes.addAll(chunk);
               } else {
-                print('[VIEWER] Missing chunk $i, displaying partial frame');
                 break;
               }
             }
@@ -838,11 +581,9 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
           return;
         }
       }
-      print(
-          '[VIEWER] Received single frame from: $senderId, size: ${payload.length}');
+
       await _handleSingleFrame(payload, senderId);
     } catch (e) {
-      print('[VIEWER] Frame handling error: $e');
       try {
         await _handleSingleFrame(payload, senderId);
       } catch (fallbackError) {
@@ -856,19 +597,12 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     final receiveTime = DateTime.now().millisecondsSinceEpoch;
 
     try {
-      print(
-          '[VIEWER] Processing frame from $senderId, payload size: ${payload.length}');
-
       const minPayloadSize = StreamCryptoService.nonceLength + 4 + 8;
       if (payload.length < minPayloadSize) {
-        print(
-            '[VIEWER] Payload too short: ${payload.length} < $minPayloadSize bytes');
         return;
       }
 
       final nonce = payload.sublist(0, StreamCryptoService.nonceLength);
-      print('[VIEWER] Extracted nonce: ${nonce.length} bytes');
-
       final timestampOffset = payload.length - 12;
       final timestamp = payload.buffer.asByteData().getInt32(timestampOffset);
 
@@ -879,48 +613,34 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       } catch (e) {
         frameId = receiveTime;
       }
-      print(
-          '[TIMING] VIEWER: Frame $frameId received at $receiveTime (${payload.length} bytes)');
 
       final encrypted =
           payload.sublist(StreamCryptoService.nonceLength, timestampOffset);
-      print('[VIEWER] Extracted encrypted data: ${encrypted.length} bytes');
 
       Uint8List? aesKey = _cachedKeys[senderId];
       if (aesKey == null) {
-        print('[VIEWER] Fetching AES key for sender: $senderId');
         aesKey = await StreamKeyExchangeService.getStreamKey(
           widget.streamId,
           otherUserId: senderId,
         );
         if (aesKey == null) {
-          print('[VIEWER] No AES key available for sender: $senderId');
           return;
         }
         _cachedKeys[senderId] = aesKey;
       }
 
-      final decryptStartTime = DateTime.now().millisecondsSinceEpoch;
       Uint8List? decrypted;
 
       try {
-        print('[VIEWER] Starting native decryption for frameId: $frameId');
-
         decrypted = await NativeVideoPlugin.decryptFrame(
           encrypted: encrypted,
           aesKey: aesKey,
           nonce: nonce,
           streamId: widget.streamId,
           timestamp: timestamp,
-          frameId: frameId,
         );
-        print(
-            '[VIEWER] Native decryption successful: ${decrypted.length} bytes');
       } catch (e) {
-        print('[VIEWER] Native decryption failed: $e');
-
         try {
-          print('[VIEWER] Trying Dart fallback decryption...');
           decrypted = await compute(_isolateDecryptFrame, {
             'encrypted': encrypted,
             'nonce': nonce,
@@ -928,8 +648,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
             'streamId': widget.streamId,
             'timestamp': timestamp,
           });
-          print(
-              '[VIEWER] Dart decryption successful: ${decrypted?.length} bytes');
         } catch (fallbackError) {
           print('[VIEWER] Dart decryption also failed: $fallbackError');
           return;
@@ -937,151 +655,40 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       }
 
       if (decrypted == null) {
-        print('[VIEWER] Decryption returned null');
         return;
       }
 
       _viewerFramesReceived++;
 
-      final decryptDuration =
-          DateTime.now().millisecondsSinceEpoch - decryptStartTime;
-      final renderStartTime = DateTime.now().millisecondsSinceEpoch;
-
       _frameBuffer.updateFrame(decrypted, frameId ?? receiveTime);
-
       _startFrameRenderer();
 
       if (mounted) {
-        try {
-          // Keep existing latency tracking
-          if (_latencyTestEnabled && frameId != null) {
-            print(
-                '[LATENCY_TEST] Recording frame rendered: $frameId at $renderStartTime');
-
-            _latencyTracker.recordFrameRendered(frameId);
-
-            try {
-              final success =
-                  await NativeVideoPlugin.recordFrameRendered(frameId);
-              if (success) {
-                print(
-                    '[LATENCY_TEST] VIEWER: Frame rendered with ID=$frameId at timestamp=$renderStartTime');
-              } else {
-                print('[LATENCY_TEST] Failed to record in native: $frameId');
-              }
-            } catch (e) {
-              print('[LATENCY_TEST] Native record error: $e');
-            }
-          }
-
-          final decryptTime = DateTime.now().millisecondsSinceEpoch;
-          final networkLatency = decryptTime - receiveTime;
-          print(
-              '[TIMING] VIEWER: Frame $frameId processed in ${networkLatency}ms');
-        } catch (e) {
-          print('[VIEWER] Error in frame processing: $e');
-        }
+        setState(() {
+          _remoteVideoConnected = true;
+        });
       }
     } catch (e, stackTrace) {
-      print(
-          '[TIMING] VIEWER: Frame processing failed after ${DateTime.now().millisecondsSinceEpoch - receiveTime}ms: $e');
       print('[VIEWER] Critical error in frame handling: $e');
       print('[VIEWER] Stack trace: $stackTrace');
     }
   }
 
   void _startFrameRenderer() {
-    if (_renderTimer != null) return; // Already running
+    if (_renderTimer != null) return;
 
     _renderTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
-      // 30 FPS max
       final frame = _frameBuffer.consumeLatestFrame();
       if (frame != null && mounted) {
         setState(() {
           _currentFrame = frame;
-          _remoteVideoConnected = true;
         });
 
-        // Complete the frame processing cycle
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _frameBuffer.setProcessingComplete();
         });
       }
     });
-  }
-
-  Future<void> _startEntropyTest() async {
-    if (!widget.isStreamer) return; // Only streamer collects entropy
-
-    print('[ENTROPY_TEST] Starting 60-second entropy collection...');
-
-    final started = await NativeVideoPlugin.startEntropyTest();
-    if (started) {
-      setState(() {
-        _entropyTestEnabled = true;
-      });
-
-      // Stop after 60 seconds
-      _entropyTestTimer = Timer(const Duration(seconds: 60), () async {
-        await _stopEntropyTest();
-      });
-
-      // Update stats every 5 seconds
-      Timer.periodic(const Duration(seconds: 5), (timer) async {
-        if (!_entropyTestEnabled) {
-          timer.cancel();
-          return;
-        }
-
-        final stats = await NativeVideoPlugin.getEntropyTestStats();
-        if (stats != null) {
-          setState(() {
-            _entropyStats = stats;
-          });
-        }
-      });
-    }
-  }
-
-  Future<void> _stopEntropyTest() async {
-    print('[ENTROPY_TEST] Stopping entropy collection...');
-
-    final result = await NativeVideoPlugin.stopEntropyTest();
-    _entropyTestTimer?.cancel();
-
-    setState(() {
-      _entropyTestEnabled = false;
-    });
-
-    if (result is Map<String, dynamic>) {
-      final framesCollected = result['framesCollected'] ?? 0;
-      final outputDir = result['outputDir'] ?? 'unknown';
-
-      print('[ENTROPY_TEST] Collection complete:');
-      print('  - Frames collected: $framesCollected');
-      print('  - Output directory: $outputDir');
-
-      // Show completion dialog
-      if (mounted) {
-        showDialog(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: const Text('Entropy Test Complete'),
-            content: Text(
-              'Collected $framesCollected encrypted frames.\n\n'
-              'Files saved to:\n$outputDir\n\n'
-              'Copy the "ciphertext" folder to your computer to run entropy analysis.',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('OK'),
-              ),
-            ],
-          ),
-        );
-      }
-    }
   }
 
   Future<void> _preloadViewerKey() async {
@@ -1092,7 +699,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
       );
       if (aesKey != null) {
         _cachedKeys[widget.streamerId] = aesKey;
-        print('[VIEWER] Key cached for streamer: ${widget.streamerId}');
       }
     } catch (e) {
       print('[VIEWER] Failed to preload key: $e');
@@ -1125,14 +731,8 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
   @override
   void dispose() {
     _renderTimer?.cancel();
-
     _audioDelayTimer?.cancel();
     _pendingAudioTrack?.dispose();
-
-    if (_latencyTestEnabled) {
-      _latencyTracker.stop();
-      _latencyStatsTimer?.cancel();
-    }
 
     if (_nativePipelineActive) {
       NativeVideoPlugin.stopVideoStream();
@@ -1148,9 +748,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     }
 
     _keyRotationTimer?.cancel();
-    _fpsTimer?.cancel();
-    _nativeStatsTimer?.cancel();
-
     _cameraController.dispose();
     _cachedKeys.clear();
 
@@ -1387,106 +984,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
     }
   }
 
-  Widget _buildLatencyStatsOverlay() {
-    if (!_latencyTestEnabled || _currentLatencyStats.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
-    return Positioned(
-      top: 100,
-      right: 16,
-      child: Container(
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.7),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'E2E LATENCY',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 10,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'Avg: ${_currentLatencyStats['average']?.toStringAsFixed(1) ?? 'N/A'}ms',
-              style: const TextStyle(color: Colors.white, fontSize: 9),
-            ),
-            Text(
-              'P95: ${_currentLatencyStats['p95']?.toStringAsFixed(1) ?? 'N/A'}ms',
-              style: const TextStyle(color: Colors.white, fontSize: 9),
-            ),
-            Text(
-              'Samples: ${_currentLatencyStats['samples']?.toInt() ?? 0}',
-              style: const TextStyle(color: Colors.white70, fontSize: 8),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildEntropyTestUI() {
-    if (!widget.isStreamer) return const SizedBox.shrink();
-
-    return Positioned(
-      top: 150,
-      right: 16,
-      child: Container(
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.8),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'ENTROPY TEST',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 10,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(height: 4),
-            if (_entropyTestEnabled) ...[
-              Text(
-                'Collecting...',
-                style: const TextStyle(color: Colors.green, fontSize: 9),
-              ),
-              Text(
-                'Frames: ${_entropyStats['framesCollected'] ?? 0}',
-                style: const TextStyle(color: Colors.white, fontSize: 9),
-              ),
-            ] else ...[
-              GestureDetector(
-                onTap: _startEntropyTest,
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: Colors.blue,
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: const Text(
-                    'START',
-                    style: TextStyle(color: Colors.white, fontSize: 8),
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     if (_hasError) {
@@ -1529,9 +1026,10 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
               Container(
                 color: Colors.black,
                 child: SizedBox(
-                    width: double.infinity,
-                    height: MediaQuery.of(context).size.width * 9 / 16,
-                    child: _buildVideoDisplay()),
+                  width: double.infinity,
+                  height: MediaQuery.of(context).size.width * 9 / 16,
+                  child: _buildVideoDisplay(),
+                ),
               ),
               SafeArea(
                 child: Padding(
@@ -1547,8 +1045,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
                   ),
                 ),
               ),
-              _buildLatencyStatsOverlay(),
-              _buildEntropyTestUI(),
             ],
           ),
           Container(
@@ -1590,44 +1086,6 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
                               fontSize: 14,
                             ),
                           ),
-                          const Spacer(),
-                          if (widget.isStreamer)
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: _getFpsColor(),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Text(
-                                '${_getCurrentFps().toStringAsFixed(0)} FPS',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ),
-                          if (!widget.isStreamer &&
-                              _currentLatencyStats.isNotEmpty)
-                            Container(
-                              margin: const EdgeInsets.only(left: 8),
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(
-                                color: _getLatencyColor(
-                                    _currentLatencyStats['average'] ?? 0),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Text(
-                                '${(_currentLatencyStats['average'] ?? 0).toStringAsFixed(0)}ms',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 10,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ),
                         ],
                       ),
                     ],
@@ -1642,26 +1100,5 @@ class _LiveStreamPageState extends State<LiveStreamPage> {
         ],
       ),
     );
-  }
-
-  Color _getLatencyColor(double latency) {
-    if (latency <= 100) return Colors.green;
-    if (latency <= 200) return Colors.orange;
-    return Colors.red;
-  }
-
-  Color _getFpsColor() {
-    final fps = _getCurrentFps();
-    if (fps >= 25) return Colors.green;
-    if (fps >= 15) return Colors.orange;
-    return Colors.red;
-  }
-
-  double _getCurrentFps() {
-    if (widget.isStreamer) {
-      return _nativeFPS;
-    } else {
-      return _viewerFPS;
-    }
   }
 }
