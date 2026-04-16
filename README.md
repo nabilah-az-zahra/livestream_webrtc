@@ -68,7 +68,7 @@ When a streaming session begins:
 ### 3. Video Encryption (Streamer Side)
 For every captured video frame:
 1. Frame is captured from camera in YUV format via native Android module
-2. Frame is converted and compressed to **JPEG**
+2. Frame is converted and compressed to **JPG**
 3. A unique **12-byte nonce (IV)** is generated per frame
 4. **Additional Authenticated Data (AAD)** is constructed from `streamId + timestamp`
 5. Frame is encrypted using **AES-256-GCM** with the AES key, nonce, and AAD
@@ -88,35 +88,35 @@ For every received payload:
 ## Application Flow
 
 ### Login Modal 
-![Login Modal](screenshots/loginmodal.jpeg)
+![Login Modal](screenshots/loginmodal.jpg)
 When opening the application for the first time, users are directed to the home page where they can start or watch a live stream. If the user is not authenticated, a pop-up is displayed prompting them to choose between registering a new account or logging in. The system then navigates to the corresponding page based on the user's selection.
 
 ### Registration 
-![Register](screenshots/register.jpeg)
+![Register](screenshots/register.jpg)
 User fills in name, email, and password. Upon successful registration, the system generates a key pair with the public key is stored in Firebase and the private key is stored both locally (via Flutter Secure Storage) and in Firebase in encrypted form.
 
 ### Login 
-![Login](screenshots/login.jpeg)
+![Login](screenshots/login.jpg)
 User enters email and password. Upon successful authentication, the system retrieves the encrypted private key from Firebase, decrypts it on-device, and verifies it against the locally stored private key to confirm key integrity.
 
 ### Home Page
-![Home Page](screenshots/homepage.jpeg)
+![Home Page](screenshots/homepage.jpg)
 Displays a list of currently active live streams with streamer name and stream title. Unauthenticated users are prompted to register or log in before joining or starting a stream.
 
 ### Start Live 
-![Start Live](screenshots/startlive.jpeg)
+![Start Live](screenshots/startlive.jpg)
 Streamer enters a stream title and starts the session. The app accesses the device camera and microphone, requests a JWT token from the LiveKit token server, and connects to the LiveKit server as a publisher.
 
 ### Watch Live 
-![Watch Live](screenshots/livestream.jpeg)
+![Watch Live](screenshots/livestream.jpg)
 Viewer selects a live stream, requests a JWT token with subscriber access, connects to LiveKit, and begins receiving encrypted video frames which are decrypted and displayed in real-time. In-stream chat is available for interaction.
 
 ### Profile
-![Profile](screenshots/profile.jpeg)
+![Profile](screenshots/profile.jpg)
 A personalized and easily accessible page where users can view and manage their account information, preferences, and activity. Also includes a logout button to sign out of the application.
 
 ### Logout Modal
-![Logout Modal](screenshots/logoutmodal.jpeg)
+![Logout Modal](screenshots/logoutmodal.jpg)
 A confirmation dialog displayed when the user initiates a logout, asking whether they are sure they want to sign out. The user can confirm by selecting Yes or cancel the action to remain logged in.
 
 ---
